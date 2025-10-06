@@ -3,6 +3,8 @@ import path from "path"
 import mime from "mime"
 import { fileURLToPath } from "url"
 import ViteExpress from "vite-express"
+import fetch from "node-fetch";
+
 
 const dir  = "src/",
       port = 3000
@@ -12,97 +14,84 @@ const __dirname = path.dirname(__filename)
 
 const app = express()
 
+const NBA_TEAMS = new Set([
+  "Atlanta Hawks","Boston Celtics","Brooklyn Nets","Charlotte Hornets","Chicago Bulls",
+  "Cleveland Cavaliers","Dallas Mavericks","Denver Nuggets","Detroit Pistons","Golden State Warriors",
+  "Houston Rockets","Indiana Pacers","LA Clippers","Los Angeles Lakers","Memphis Grizzlies",
+  "Miami Heat","Milwaukee Bucks","Minnesota Timberwolves","New Orleans Pelicans","New York Knicks",
+  "Oklahoma City Thunder","Orlando Magic","Philadelphia 76ers","Phoenix Suns","Portland Trail Blazers",
+  "Sacramento Kings","San Antonio Spurs","Toronto Raptors","Utah Jazz","Washington Wizards"
+]);
+
+
 app.use(express.json()) 
 
-const appdata = []
+const API_KEY = "";
 
-const organizeAppData = function() {
-  const currentTime = new Date(); 
+app.get("/api/nba-today", async (req, res) => {
+  const today = new Date().toISOString().split("T")[0];
+  const url = `https://v1.basketball.api-sports.io/games?date=${today}`;
 
-  appdata.sort((a, b) => {
-    const timeA = new Date(`1970-01-01T${a.time_input}:00Z`);
-    const timeB = new Date(`1970-01-01T${b.time_input}:00Z`);
-
-    const diffA = Math.abs(currentTime - timeA);
-    const diffB = Math.abs(currentTime - timeB);
-
-    return diffB - diffA; 
+  const response = await fetch(url, {
+    headers: { "x-apisports-key": API_KEY },
   });
 
-};
+  const data = await response.json();
 
-const determinePriority = function(){ 
-  const currentTime = new Date(`1970-01-01T${new Date().toTimeString().split(' ')[0]}Z`);
+  // Keep NBA teams only
+  const nbaOnly = (data.response || []).filter(
+    (g) => NBA_TEAMS.has(g?.teams?.home?.name) && NBA_TEAMS.has(g?.teams?.away?.name)
+  );
 
-  for (let i = 0; i < appdata.length; i++) {
-    const taskTime = new Date(`1970-01-01T${appdata[i].time_input}:00Z`);
-    const timeDiff = (taskTime - currentTime) / (1000 * 60);
+  res.json(
+    nbaOnly.map((game) => ({
+      home: game.teams.home.name,
+      away: game.teams.away.name,
+      status: game.status.short,
+      date: game.date,
+    }))
+  );
+});
 
-    if (timeDiff <= 30 && timeDiff >= 0) {
-      appdata[i].priority = "High";
-    } else if (timeDiff > 30 && timeDiff <= 120) {
-      appdata[i].priority = "Medium";
-    } else if (timeDiff > 120) {
-      appdata[i].priority = "Low";
-    }
-    else {
-      appdata[i].priority = "Expired";
-    }
-  }
-}
 
-const ensureNoDuplicates = function(newTask) {
-  return !appdata.some(task => task.task_input === newTask.task_input && task.time_input === newTask.time_input);
-}
+app.get("/api/nfl-today", async (req, res) => {
+  const today = new Date().toISOString().split("T")[0];
+  const url = `https://v1.american-football.api-sports.io/games?date=${today}`;
 
-app.get("/tasks", function(req, res){
-  organizeAppData();
-  determinePriority();
-  res.status(200).json(appdata)
-})
+  const response = await fetch(url, {
+    headers: { "x-apisports-key": API_KEY },
+  });
 
-app.post("/update-time", function(req, res){
-  const parsedData = req.body
-  const task = appdata.find(t => t.task_id === parsedData.id);
-  if (task) {
-    task.time_input = parsedData.time_input;
-  }
-  organizeAppData();
-  determinePriority();
-  res.status(200).json(appdata)
-})
+  const data = await response.json();
+  res.json(
+    (data.response || []).map((game) => ({
+      home: game.teams?.home?.name,
+      away: game.teams?.away?.name,
+      status: game.status?.short,
+      date: game.date,
+    }))
+  );
+});
 
-app.post("/update-name", function(req, res){
-  const parsedData = req.body
-  const task = appdata.find(t => t.task_id === parsedData.id);
-  if (task && typeof parsedData.task_input === "string" && parsedData.task_input.trim() !== "") {
-    task.task_input = parsedData.task_input.trim();
-  }
-  organizeAppData();
-  determinePriority();
-  res.status(200).json(appdata)
-})
 
-app.post("/delete-task", function(req, res){
-  const parsedData = req.body
-  const taskIndex = appdata.findIndex(t => t.task_id === parsedData.id);
-  if (taskIndex !== -1) {
-    appdata.splice(taskIndex, 1);
-  }
-  organizeAppData();
-  determinePriority();
-  res.status(200).json(appdata)
-})
+app.get("/api/mlb-today", async (req, res) => {
+  const today = new Date().toISOString().split("T")[0];
+  const url = `https://v1.baseball.api-sports.io/games?date=${today}`;
 
-app.post("/submit", function(req, res){
-  const parsedData = req.body
-  if (ensureNoDuplicates(parsedData)) {
-    appdata.push(parsedData);
-  }
-  organizeAppData();
-  determinePriority();
-  res.status(200).json(appdata)
-})
+  const response = await fetch(url, {
+    headers: { "x-apisports-key": API_KEY },
+  });
+
+  const data = await response.json();
+  res.json(
+    (data.response || []).map((game) => ({
+      home: game.teams?.home?.name,
+      away: game.teams?.away?.name,
+      status: game.status?.short,
+      date: game.date,
+    }))
+  );
+});
 
 
 // Serve the production build in production
