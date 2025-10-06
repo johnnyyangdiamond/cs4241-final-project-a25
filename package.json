@@ -1,0 +1,26 @@
+{
+  "name": "a4-johndiamond",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Daily tasks app with Vite + React + Express",
+  "author": "",
+  "scripts": {
+    "dev": "node server.improved.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server.improved.js",
+    "start": "NODE_ENV=production node server.improved.js"
+  },
+  "dependencies": {
+    "vite-express": "0.21.1",
+    "express": "^4.19.2",
+    "mime": "^2.6.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.8"
+  }
+}
