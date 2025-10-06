@@ -4,15 +4,18 @@ import mime from "mime"
 import { fileURLToPath } from "url"
 import ViteExpress from "vite-express"
 import fetch from "node-fetch";
+import { MongoClient, ServerApiVersion } from "mongodb";
+import dotenv from "dotenv";
+dotenv.config();
 
+const app = express()
+app.use(express.json()) 
 
 const dir  = "src/",
       port = 3000
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-
-const app = express()
 
 const NBA_TEAMS = new Set([
   "Atlanta Hawks","Boston Celtics","Brooklyn Nets","Charlotte Hornets","Chicago Bulls",
@@ -23,10 +26,53 @@ const NBA_TEAMS = new Set([
   "Sacramento Kings","San Antonio Spurs","Toronto Raptors","Utah Jazz","Washington Wizards"
 ]);
 
+const API_KEY = process.env.API_KEY;
 
-app.use(express.json()) 
 
-const API_KEY = "";
+
+
+const uri = `mongodb+srv://${process.env.USERNM}:${process.env.PASS}@${process.env.HOST}/?retryWrites=true&w=majority&appName=sportsCluster`;
+
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+});
+
+async function run() {
+  try {
+    // Connect the client to the server	(optional starting in v4.7)
+    await client.connect();
+
+    const collection = client.db("a3-database").collection("a3-collection");
+
+    if(collection !== null){
+      console.log("Collection exists");
+    }
+
+    // Send a ping to confirm a successful connection
+    await client.db("a3-database").command({ ping: 1 });
+    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+  } finally {
+    // Ensures that the client will close when you finish/error
+    await client.close();
+  }
+}
+run().catch(console.dir);
+
+app.use((req, res, next) => {
+  if (collection !== null){
+    next();
+  } else {
+    res.status(503).send("Collection does not exists");
+  }
+});
+
+
+
 
 app.get("/api/nba-today", async (req, res) => {
   const today = new Date().toISOString().split("T")[0];
@@ -35,6 +81,12 @@ app.get("/api/nba-today", async (req, res) => {
   const response = await fetch(url, {
     headers: { "x-apisports-key": API_KEY },
   });
+
+  if (!response.ok) {
+    return res.status(response.status).json({
+      error: `API request failed with status ${response.status}: ${response.statusText}`,
+    });
+  }
 
   const data = await response.json();
 
@@ -62,6 +114,12 @@ app.get("/api/nfl-today", async (req, res) => {
     headers: { "x-apisports-key": API_KEY },
   });
 
+  if (!response.ok) {
+    return res.status(response.status).json({
+      error: `API request failed with status ${response.status}: ${response.statusText}`,
+    });
+  }
+
   const data = await response.json();
   res.json(
     (data.response || []).map((game) => ({
@@ -81,6 +139,12 @@ app.get("/api/mlb-today", async (req, res) => {
   const response = await fetch(url, {
     headers: { "x-apisports-key": API_KEY },
   });
+
+  if (!response.ok) {
+    return res.status(response.status).json({
+      error: `API request failed with status ${response.status}: ${response.statusText}`,
+    });
+  }
 
   const data = await response.json();
   res.json(

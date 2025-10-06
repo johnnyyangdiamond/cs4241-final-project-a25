@@ -2,147 +2,69 @@ import React, { useEffect, useState } from 'react'
 
 function App(){
 
-  // State variables
-  const [tasks, setTasks] = useState([])
-  const [taskName, setTaskName] = useState("")
-  const [taskTime, setTaskTime] = useState("")
-  const [counter, setCounter] = useState(0)
+  const [nba, setNba] = useState([])
+  const [nfl, setNfl] = useState([])
+  const [mlb, setMlb] = useState([])
 
-  // Fetch tasks from the server
-  const fetchTasks = async () => {
-    const res = await fetch('/tasks')
-    const data = await res.json()
-    setTasks(data)
-  }
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
-  // Fetch tasks from the server every minute
   useEffect(() => {
-    fetchTasks()
-    const id = setInterval(fetchTasks, 60000)
-    return () => clearInterval(id)
+    const loadAll = async () => {
+      try {
+        const [nbaRes, nflRes, mlbRes] = await Promise.all([
+          fetch('/api/nba-today'),
+          fetch('/api/nfl-today'),
+          fetch('/api/mlb-today'),
+        ])
+        if (!nbaRes.ok || !nflRes.ok || !mlbRes.ok) {
+          throw new Error(`Failed: ${[nbaRes.status, nflRes.status, mlbRes.status].join(', ')}`)
+        }
+        const [nbaJson, nflJson, mlbJson] = await Promise.all([
+          nbaRes.json(),
+          nflRes.json(),
+          mlbRes.json(),
+        ])
+        setNba(nbaJson || [])
+        setNfl(nflJson || [])
+        setMlb(mlbJson || [])
+      } catch (e) {
+        setError(e.message || 'Failed to load games')
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadAll()
   }, [])
 
+  const renderList = (title, list) => (
+    <section style={{ marginTop: 24 }}>
+      <h2>{title}</h2>
+      {loading && <p>Loading games...</p>}
+      {error && <p style={{ color: 'crimson' }}>{error}</p>}
+      {!loading && !error && (
+        list.length === 0 ? (
+          <p>No games today.</p>
+        ) : (
+          <ul>
+            {list.map((g, idx) => (
+              <li key={`${title}-${idx}`}>
+                {g?.away || 'TBD'} at {g?.home || 'TBD'}  — {g?.status || 'Scheduled'}
+              </li>
+            ))}
+          </ul>
+        )
+      )}
+    </section>
+  )
 
-  // Submit a new task to the server
-  const submit = async (e) => {
-    e.preventDefault()
-    const body = { task_input: taskName, time_input: taskTime, task_id: counter }
-    const res = await fetch('/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
-    const data = await res.json()
-
-    // Update the tasks state
-    setTasks(data)
-    setCounter(counter + 1)
-    setTaskName("")
-    setTaskTime("")
-  }
-
-  // Delete a task from the server
-  const handleDeleteTask = async (taskId) => {
-    const res = await fetch('/delete-task', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: taskId })
-    })
-    const data = await res.json()
-    setTasks(data) // Update the tasks state
-  }
-
-  // Update the time of a task from the server
-  const handleTimeEdit = async (taskId, newTime, originalTime) => {
-    if (!newTime || !/^([01]\d|2[0-3]):([0-5]\d)$/.test(newTime)) {
-      alert('Please enter a valid time in the format HH:MM.')
-      fetchTasks()
-      return
-    }
-    const res = await fetch('/update-time', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: taskId, time_input: newTime })
-    })
-    const data = await res.json()
-    setTasks(data)
-  }
-
-  // Update the name of a task on the server
-  const handleNameEdit = async (taskId, newName, originalName) => {
-    const trimmed = (newName || '').trim()
-    if (!trimmed) {
-      alert('Task name cannot be empty.')
-      fetchTasks()
-      return
-    }
-    const res = await fetch('/update-name', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: taskId, task_input: trimmed })
-    })
-    const data = await res.json()
-    setTasks(data)
-  }
-
-  // Render the app
   return (
     <div>
-      <h1>Daily Tasks</h1>
-      <div id="form-description">
-        <p>
-          Enter your daily tasks along with a time, and they will appear below.
-          Delete each one that you complete!
-        </p>
-        <form id="task-form" onSubmit={submit}>
-          {/* Task name input */}
-          {/* Use state function to update the task name */}
-          <input type="text" id="task-name" placeholder="Task name" required value={taskName} onChange={(e)=>setTaskName(e.target.value)} />
-          {/* Task time input */}
-          <input type="time" id="task-time" required value={taskTime} onChange={(e)=>setTaskTime(e.target.value)} />
-          <button type="submit">Add Task</button>
-        </form>
-      </div>
-      <div id="task-list">
-        <table className="task-table">
-          <thead>
-            <tr>
-              {/* Set the table headers */}
-              {['Task Name', 'Time', 'Priority'].map(h => (<th key={h} className="task-header">{h}</th>))}
-            </tr>
-          </thead>
-          <tbody>
-            {/* Map through the tasks and render the task rows */}
-            {tasks.map((task) => (
-              <tr key={task.task_id} className="task-row">
-                <td className="task-cell">
-                  <input
-                    defaultValue={task.task_input}  
-                    onBlur={(e)=>handleNameEdit(task.task_id, e.target.value, task.task_input)}  // Update the name of the task on the server
-                    style={{ textAlign: 'center', background: 'transparent', color: 'inherit', border: 'none', width: '100%' }} 
-                  />
-                </td>
-                <td className="task-cell">
-                  {/* Render the task time */}
-                  <input
-                    defaultValue={task.time_input}
-                    onBlur={(e)=>handleTimeEdit(task.task_id, e.target.value, task.time_input)} // Update the time of the task on the server
-                    style={{ textAlign: 'center', background: 'transparent', color: 'inherit', border: 'none' }}
-                  />
-                </td>
-                {/* Render the task priority with background color */}
-                <td className={`task-cell ${task.priority === 'High' ? 'high-priority' : task.priority === 'Medium' ? 'medium-priority' : task.priority === 'Low' ? 'low-priority' : 'expired-priority'}`}>{task.priority}</td>
-                <td>
-                  <button className="delete-button task-row" onClick={()=>handleDeleteTask(task.task_id)}>Delete</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {renderList('NBA Today', nba)}
+      {renderList('NFL Today', nfl)}
+      {renderList('MLB Today', mlb)}
     </div>
   )
 }
 
 export default App
-
