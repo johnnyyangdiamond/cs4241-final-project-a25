@@ -1,0 +1,7 @@
+[
+  { "id": 1, "sport": "NBA", "homeTeam": "Lakers", "awayTeam": "Celtics", "time": "Today, 7:30 PM", "homeOdds": -145, "awayOdds": 125 },
+  { "id": 2, "sport": "NFL", "homeTeam": "49ers", "awayTeam": "Chiefs", "time": "Today, 8:15 PM", "homeOdds": 110, "awayOdds": -130 },
+  { "id": 3, "sport": "NHL", "homeTeam": "Rangers", "awayTeam": "Bruins", "time": "Tomorrow, 7:00 PM", "homeOdds": -120, "awayOdds": 100 },
+  { "id": 4, "sport": "MLB", "homeTeam": "Yankees", "awayTeam": "Red Sox", "time": "Tomorrow, 7:05 PM", "homeOdds": -155, "awayOdds": 135 },
+  { "id": 5, "sport": "NBA", "homeTeam": "Warriors", "awayTeam": "Nets", "time": "Tomorrow, 10:00 PM", "homeOdds": -165, "awayOdds": 145 }
+]

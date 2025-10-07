@@ -1,0 +1,34 @@
+[
+  {
+    "id": 4,
+    "gameId": 1,
+    "bet": "home",
+    "amount": 100,
+    "status": "pending",
+    "placedAt": "10/6/2025, 6:35:33 PM"
+  },
+  {
+    "id": 1,
+    "gameId": 1,
+    "bet": "home",
+    "amount": 250,
+    "status": "pending",
+    "placedAt": "Yesterday, 6:45 PM"
+  },
+  {
+    "id": 2,
+    "gameId": 2,
+    "bet": "away",
+    "amount": 500,
+    "status": "won",
+    "placedAt": "2 days ago"
+  },
+  {
+    "id": 3,
+    "gameId": 3,
+    "bet": "home",
+    "amount": 150,
+    "status": "lost",
+    "placedAt": "3 days ago"
+  }
+]
