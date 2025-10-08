@@ -46,6 +46,8 @@ const client = new MongoClient(uri, {
 
 // Make collection accessible to middleware/routes
 let balance_collection = null;
+let games_collection = null;
+let placedBets_collection = null;
 
 async function run() {
   try {
@@ -53,9 +55,11 @@ async function run() {
     await client.connect();
     // Assign to the module-scoped variable so middleware/routes can use it
     balance_collection = client.db("final_project").collection("balance");
+    games_collection = client.db("final_project").collection("games");
+    placedBets_collection = client.db("final_project").collection("placedBets");
 
-    if (balance_collection !== null) {
-      console.log("Collection exists");
+    if (balance_collection !== null && games_collection !== null && placedBets_collection !== null) {
+      console.log("Collections exists");
     }
 
     // Send a ping to confirm a successful connection
@@ -77,10 +81,10 @@ run().catch((err) => {
 });
 
 app.use((req, res, next) => {
-  if (balance_collection !== null){
+  if (balance_collection !== null && games_collection !== null && placedBets_collection !== null){
     next();
   } else {
-    res.status(503).send("Collection does not exists");
+    res.status(503).send("Not all collections exist");
   }
 });
 
@@ -103,50 +107,67 @@ cron.schedule("0 * * * *", async () => {
 
 app.get('/api/games', async (req, res) => {
   try {
-    const raw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')  // Currently obtains games from json file
-    const games = JSON.parse(raw)
-    res.json(games)
+    const games = await games_collection.find({}).toArray();
+    res.json(games);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to read games' })
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch games" });
   }
 })
 
-app.get('/api/placed-bets', async (req, res) => {
+
+app.get("/api/placed-bets", async (req, res) => {
   try {
-    const raw = await fs.readFile(path.join(DATA_DIR, 'placedBets.json'), 'utf8')
-    const bets = JSON.parse(raw)
-    // enrich with game objects
-    const gamesRaw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')
-    const games = JSON.parse(gamesRaw)
-    // Add new field game which holds game object
-    const enriched = bets.map(b => ({ ...b, game: games.find(g => g.id === b.gameId) }))
-    res.json(enriched)
+    // Get bets and map them to existing games
+    const bets = await placedBets_collection.aggregate([
+      {
+        $lookup: {
+          from: "games",         // the other collection name
+          localField: "gameId",  // field in placedBets
+          foreignField: "id",    // matching field in games
+          as: "game"
+        }
+      },
+      { $unwind: "$game" },     // flatten the joined array
+      { $sort: { id: -1 }}      // sort by id
+    ]).toArray();
+
+    res.json(bets);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to read placed bets' })
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch placed bets" });
   }
-})
+});
+
+
 
 app.post('/api/place-bet', async (req, res) => {
   try {
     const { gameId, bet, amount } = req.body
     if (!gameId || !bet || !amount) return res.status(400).json({ error: 'Missing fields' })
 
-    // Load existing bets and find one with highest id and add one to create new ID
-    const raw = await fs.readFile(path.join(DATA_DIR, 'placedBets.json'), 'utf8')
-    const bets = JSON.parse(raw)
-    const id = bets.length ? Math.max(...bets.map(b => b.id)) + 1 : 1
+    // Validate that the game exists
+    const game = await games_collection.findOne({ id: gameId });
+    if (!game)
+      return res.status(404).json({ error: "Game not found" });
 
-    // Create new bet object and place in beginning of array and write to file
-    const newBet = { id, gameId, bet, amount, status: 'pending', placedAt: new Date().toLocaleString() }
-    bets.unshift(newBet)
-    await fs.writeFile(path.join(DATA_DIR, 'placedBets.json'), JSON.stringify(bets, null, 2), 'utf8')
+    // Compute next id
+    const last = await placedBets_collection.findOne({}, { sort: { id: -1 } });
+    const newId = last ? last.id + 1 : 1;
 
-    // return bet with game info
-    const gamesRaw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')
-    const games = JSON.parse(gamesRaw)
-    // Same logic to return enriched games info
-    const enriched = { ...newBet, game: games.find(g => g.id === newBet.gameId) }
-    res.json(enriched)
+    // Create new bet
+    const newBet = {
+      id: newId,
+      gameId,
+      bet,
+      amount,
+      status: "pending",
+      placedAt: new Date().toLocaleString(),
+    };
+
+    await placedBets_collection.insertOne(newBet);
+
+    res.json({ ...newBet, game });
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Failed to place bet' })

@@ -102,7 +102,16 @@ export default function App() {
             if (!res.ok) throw new Error('Failed to place bet')
             const placed = await res.json()
             setPlacedBets((s) => [placed, ...s])  // Update placedBet useState 
-            setBalance((prev) => (prev ? { ...prev, amount: placed.newBalance } : prev))  // Update balance
+
+            // Call post to update balance
+            const res2 = await fetch("/api/balance/deduct", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount }),
+            })
+            const updated = await res2.json();
+            setBalance(updated);
+
             window.alert(`Bet placed on ${team === 'home' ? game.homeTeam : game.awayTeam} for $${amount}`)
         } catch (err) {
             console.error(err)
