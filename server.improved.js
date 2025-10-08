@@ -263,7 +263,7 @@ export async function getTodaysGames() {
 
         // Upsert ensures no duplicates — updates if exists, inserts otherwise
         const result = await games_collection.updateOne(
-          { id: game.GlobalGameID },
+          { id: Number(game.GlobalGameId) },
           { $set: formatted },
           { upsert: true }
         );
