@@ -7,7 +7,7 @@ Current Progress:
 - Integrated MongoDB (doesn't do anything with it yet)
 - Added UI enabling all required functionality
 - MongoDB database that keeps track of the user's current money, active bets, and previous history of bets such as: what teams competed, how much money you won or lost
-- 2 tables in mongodb `Games` and `Placed Bets` that match the format of the JSON files.
+- 3 tables in mongodb `Balance`, `Games`, `Placed Bets` that match the format of the JSON files.
 
 
 Things still needed:
