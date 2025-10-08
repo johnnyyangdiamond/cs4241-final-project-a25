@@ -4,7 +4,9 @@ import mime from "mime"
 import { fileURLToPath } from "url"
 import ViteExpress from "vite-express"
 import fetch from "node-fetch";
+import cron from "node-cron";
 import { MongoClient, ServerApiVersion } from "mongodb";
+
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -43,21 +45,21 @@ const client = new MongoClient(uri, {
 });
 
 // Make collection accessible to middleware/routes
-let collection = null;
+let balance_collection = null;
 
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
     // Assign to the module-scoped variable so middleware/routes can use it
-    collection = client.db("a3-database").collection("a3-collection");
+    balance_collection = client.db("final_project").collection("balance");
 
-    if (collection !== null) {
+    if (balance_collection !== null) {
       console.log("Collection exists");
     }
 
     // Send a ping to confirm a successful connection
-    await client.db("a3-database").command({ ping: 1 });
+    await client.db("final_project").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
     // Start the server only after DB is connected
@@ -69,19 +71,20 @@ async function run() {
     process.exit(1);
   }
 }
-
 run().catch((err) => {
   console.error(err);
   process.exit(1);
 });
 
 app.use((req, res, next) => {
-  if (collection !== null){
+  if (balance_collection !== null){
     next();
   } else {
     res.status(503).send("Collection does not exists");
   }
 });
+
+
 
 // All of these currently use JSON files in ./data for simplicity
 // They should be replaced with db queries
@@ -91,9 +94,16 @@ app.use((req, res, next) => {
 import fs from 'fs/promises'
 const DATA_DIR = path.join(__dirname, 'data')
 
+// Cron job to update games every hour
+cron.schedule("0 * * * *", async () => {
+  console.log("Running sports data sync...")
+  await updateGamesFromAPI();
+});
+
+
 app.get('/api/games', async (req, res) => {
   try {
-    const raw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')
+    const raw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')  // Currently obtains games from json file
     const games = JSON.parse(raw)
     res.json(games)
   } catch (err) {
@@ -108,6 +118,7 @@ app.get('/api/placed-bets', async (req, res) => {
     // enrich with game objects
     const gamesRaw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')
     const games = JSON.parse(gamesRaw)
+    // Add new field game which holds game object
     const enriched = bets.map(b => ({ ...b, game: games.find(g => g.id === b.gameId) }))
     res.json(enriched)
   } catch (err) {
@@ -119,15 +130,21 @@ app.post('/api/place-bet', async (req, res) => {
   try {
     const { gameId, bet, amount } = req.body
     if (!gameId || !bet || !amount) return res.status(400).json({ error: 'Missing fields' })
+
+    // Load existing bets and find one with highest id and add one to create new ID
     const raw = await fs.readFile(path.join(DATA_DIR, 'placedBets.json'), 'utf8')
     const bets = JSON.parse(raw)
     const id = bets.length ? Math.max(...bets.map(b => b.id)) + 1 : 1
+
+    // Create new bet object and place in beginning of array and write to file
     const newBet = { id, gameId, bet, amount, status: 'pending', placedAt: new Date().toLocaleString() }
     bets.unshift(newBet)
     await fs.writeFile(path.join(DATA_DIR, 'placedBets.json'), JSON.stringify(bets, null, 2), 'utf8')
+
     // return bet with game info
     const gamesRaw = await fs.readFile(path.join(DATA_DIR, 'games.json'), 'utf8')
     const games = JSON.parse(gamesRaw)
+    // Same logic to return enriched games info
     const enriched = { ...newBet, game: games.find(g => g.id === newBet.gameId) }
     res.json(enriched)
   } catch (err) {
@@ -135,6 +152,37 @@ app.post('/api/place-bet', async (req, res) => {
     res.status(500).json({ error: 'Failed to place bet' })
   }
 })
+
+
+// Balance API --------------------------
+
+app.get("/api/balance", async (req, res) => {
+  try {
+    const balance = await balance_collection.findOne();
+    res.json(balance);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to get balance" });
+  }
+});
+
+app.post("/api/balance/add", async (req, res) => {
+  const { amount } = req.body;
+  await balance_collection.updateOne({}, { $inc: { amount } });
+  const updated = await balance_collection.findOne();
+  res.json(updated);
+});
+
+app.post("/api/balance/deduct", async (req, res) => {
+  const { amount } = req.body;
+  await balance_collection.updateOne({}, { $inc: { amount: -amount } });
+  const updated = await balance_collection.findOne();
+  res.json(updated);
+});
+
+
+
+
 
 
 

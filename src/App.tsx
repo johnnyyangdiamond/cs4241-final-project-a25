@@ -20,48 +20,71 @@ type PlacedBet = {
     placedAt: string
 }
 
-type User = {
-    id: number
-    name: string
-    balance: number
+type Balance = {
+    _id: string;
+    amount: number;
 }
 
-const user: User = { id: 1, name: 'John Doe', balance: 5000 };
 
 export default function App() {
-    const [balance, setBalance] = useState<number>(user.balance);
+    const [balance, setBalance] = useState<Balance | null>(null);
     const [placedBets, setPlacedBets] = useState<PlacedBet[]>([]);
     const [games, setGames] = useState<Game[]>([])
     const [loading, setLoading] = useState(true)
 
+
     useEffect(() => {
         const load = async () => {
             try {
-                const [gRes, bRes] = await Promise.all([fetch('/api/games'), fetch('/api/placed-bets')])
-                const [gamesJson, betsJson] = await Promise.all([gRes.json(), bRes.json()])
-                setGames(gamesJson)
-                setPlacedBets(betsJson)
+                // Fetch balance, games and bets
+                const [balanceRes, gamesRes, betsRes] = await Promise.all([
+                    fetch("/api/balance"),
+                    fetch("/api/games"),
+                    fetch("/api/placed-bets"),
+                ]);
+
+                const [balanceJson, gamesJson, betsJson] = await Promise.all([
+                    balanceRes.json(),
+                    gamesRes.json(),
+                    betsRes.json(),
+                ]);
+
+                setBalance(balanceJson);
+                setGames(gamesJson);
+                setPlacedBets(betsJson);
             } catch (err) {
                 console.error('Failed to load data', err)
             } finally {
                 setLoading(false)
             }
         }
-        load()
+        load()  // Called upon loading app
     }, [])
 
-    const handleAddMoney = () => setBalance((b) => b + 1000)
+    // Button to handle money
+    const handleAddMoney = async () => {
+        const amount = 1000;
+        const res = await fetch("/api/balance/add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount }),
+        });
+        const updated = await res.json();
+        setBalance(updated);
+      };
+      
 
     const handleBet = async (gameId: number, team: 'home' | 'away', odds: number) => {
         // Prompt user for amount and place bet
         const amountStr = window.prompt('Enter wager amount in USD', '100')
         if (!amountStr) return
+
         const amount = Math.trunc(Number(amountStr))
         if (!amount || amount <= 0) {
             window.alert('Please enter a valid amount')
             return
         }
-        if (amount > balance) {
+        if (amount > balance.amount) {
             window.alert('Insufficient balance')
             return
         }
@@ -78,8 +101,8 @@ export default function App() {
             })
             if (!res.ok) throw new Error('Failed to place bet')
             const placed = await res.json()
-            setPlacedBets((s) => [placed, ...s])
-            setBalance((b) => b - amount)
+            setPlacedBets((s) => [placed, ...s])  // Update placedBet useState 
+            setBalance((prev) => (prev ? { ...prev, amount: placed.newBalance } : prev))  // Update balance
             window.alert(`Bet placed on ${team === 'home' ? game.homeTeam : game.awayTeam} for $${amount}`)
         } catch (err) {
             console.error(err)
@@ -103,7 +126,9 @@ export default function App() {
                 <div className="d-flex align-items-center gap-3">
                     <div className="text-end border rounded p-3">
                         <div className="small text-muted">Balance</div>
-                        <div className="h4 mb-0">${balance.toLocaleString()}</div>
+                        <div className="h4 mb-0">
+                            {loading ? "Loading..." : `${balance?.amount?.toLocaleString()}`}
+                        </div>
                     </div>
                     <button className="btn btn-primary btn-lg rounded-circle" onClick={handleAddMoney} title="Add money">+</button>
                 </div>
