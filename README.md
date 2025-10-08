@@ -12,6 +12,7 @@ Current Progress:
 
 Things still needed:
 - Auth0 integration and login page
+- Modify the Backend to send the bets in order by most recent bet
 
 - Cronjob in the backend to periodically get data from api and update the database.
     - Get new games
@@ -20,3 +21,4 @@ Things still needed:
     - Delete old games (if current time > time of game. However, if the user bet on the game, keep the game)
 
 
+10076791
