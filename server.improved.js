@@ -31,7 +31,7 @@ const NBA_TEAMS = new Set([
 const API_KEY = process.env.API_KEY;
 
 
-
+// Mongo DB setup -------------------------
 
 const uri = `mongodb+srv://${process.env.USERNM}:${process.env.PASS}@${process.env.HOST}/?retryWrites=true&w=majority&appName=sportsCluster`;
 
@@ -66,6 +66,8 @@ async function run() {
     await client.db("final_project").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
+    getTodaysGames();
+
     // Start the server only after DB is connected
     ViteExpress.listen(app, process.env.PORT || port, () => {
       console.log(`Server listening on port ${process.env.PORT || port}`);
@@ -98,12 +100,9 @@ app.use((req, res, next) => {
 import fs from 'fs/promises'
 const DATA_DIR = path.join(__dirname, 'data')
 
-// Cron job to update games every hour
-cron.schedule("0 * * * *", async () => {
-  console.log("Running sports data sync...")
-  await updateGamesFromAPI();
-});
 
+
+// Games + bets API ------------------------------------
 
 app.get('/api/games', async (req, res) => {
   try {
@@ -162,7 +161,7 @@ app.post('/api/place-bet', async (req, res) => {
       bet,
       amount,
       status: "pending",
-      placedAt: new Date().toLocaleString(),
+      placedAt: new Date().toLocaleString([], { hour: 'numeric', minute: '2-digit' }),
     };
 
     await placedBets_collection.insertOne(newBet);
@@ -202,94 +201,166 @@ app.post("/api/balance/deduct", async (req, res) => {
 });
 
 
+// Sports API ---------------------------------
 
 
-
-
-
-
-app.get("/api/nba-today", async (req, res) => {
-  const today = new Date().toISOString().split("T")[0];
-  const url = `https://v1.basketball.api-sports.io/games?date=${today}`;
-
-  const response = await fetch(url, {
-    headers: { "x-apisports-key": API_KEY },
-  });
-
-  if (!response.ok) {
-    return res.status(response.status).json({
-      error: `API request failed with status ${response.status}: ${response.statusText}`,
-    });
-  }
-
-  const data = await response.json();
-
-  // Keep NBA teams only
-  const nbaOnly = (data.response || []).filter(
-    (g) => NBA_TEAMS.has(g?.teams?.home?.name) && NBA_TEAMS.has(g?.teams?.away?.name)
-  );
-
-  res.json(
-    nbaOnly.map((game) => ({
-      home: game.teams.home.name,
-      away: game.teams.away.name,
-      status: game.status.short,
-      date: game.date,
-    }))
-  );
+//Cron job to update games every hour
+cron.schedule("0 * * * *", async () => {
+  console.log("Running sports data sync...")
+  await getTodaysGames();
 });
 
 
-app.get("/api/nfl-today", async (req, res) => {
-  const today = new Date().toISOString().split("T")[0];
-  const url = `https://v1.american-football.api-sports.io/games?date=${today}`;
+// Make sure no odss are null
+function parseOdds(value) {
+  return value === undefined || value === null ? null : Number(value);
+}
 
-  const response = await fetch(url, {
-    headers: { "x-apisports-key": API_KEY },
-  });
+// Format time like "Today, 7:30 PM"
+function formatGameTime(dateString) {
+  if (!dateString) return "TBD";
+  const date = new Date(dateString);
+  const now = new Date();
+  const sameDay =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear();
+  const label = sameDay ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
+  const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return `${label}, ${time}`;
+}
 
-  if (!response.ok) {
-    return res.status(response.status).json({
-      error: `API request failed with status ${response.status}: ${response.statusText}`,
-    });
+export async function getTodaysGames() {
+  const sports = [
+    { sport: "NBA", endpoint: "nba/odds/json/GameOddsByDate" },
+    { sport: "NHL", endpoint: "nhl/odds/json/GameOddsByDate" },
+    { sport: "MLB", endpoint: "mlb/odds/json/GameOddsByDate" },
+  ];
+
+  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  //const formattedGames = [];
+
+  for (const { sport, endpoint } of sports) {
+    const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Failed ${sport} request: ${response.status}`);
+      const data = await response.json();
+
+      for (const game of data) {
+        const firstOdds = game.PregameOdds?.[0] || {};
+
+        const formatted = {
+          id: game.GlobalGameId, // globally unique ID across all sports
+          sport,
+          homeTeam: game.HomeTeamName || game.HomeTeam || "Unknown",
+          awayTeam: game.AwayTeamName || game.AwayTeam || "Unknown",
+          time: formatGameTime(game.DateTime),
+          homeOdds: parseOdds(firstOdds.HomeMoneyLine),
+          awayOdds: parseOdds(firstOdds.AwayMoneyLine),
+        };
+
+        // Upsert ensures no duplicates — updates if exists, inserts otherwise
+        const result = await games_collection.updateOne(
+          { id: game.GlobalGameID },
+          { $set: formatted },
+          { upsert: true }
+        );
+
+        if (result.upsertedCount > 0) console.log("Inserted new");
+        else if (result.modifiedCount > 0) console.log("Updated existing");
+        else console.log("No changes");
+      }
+    } catch (err) {
+      console.error(`Error fetching ${sport} games:`, err.message);
+    }
   }
-
-  const data = await response.json();
-  res.json(
-    (data.response || []).map((game) => ({
-      home: game.teams?.home?.name,
-      away: game.teams?.away?.name,
-      status: game.status?.short,
-      date: game.date,
-    }))
-  );
-});
+}
 
 
-app.get("/api/mlb-today", async (req, res) => {
-  const today = new Date().toISOString().split("T")[0];
-  const url = `https://v1.baseball.api-sports.io/games?date=${today}`;
+// app.get("/api/nba-today", async (req, res) => {
+//   const today = new Date().toISOString().split("T")[0];
+//   const url = `https://v1.basketball.api-sports.io/games?date=${today}`;
 
-  const response = await fetch(url, {
-    headers: { "x-apisports-key": API_KEY },
-  });
+//   const response = await fetch(url, {
+//     headers: { "x-apisports-key": API_KEY },
+//   });
 
-  if (!response.ok) {
-    return res.status(response.status).json({
-      error: `API request failed with status ${response.status}: ${response.statusText}`,
-    });
-  }
+//   if (!response.ok) {
+//     return res.status(response.status).json({
+//       error: `API request failed with status ${response.status}: ${response.statusText}`,
+//     });
+//   }
 
-  const data = await response.json();
-  res.json(
-    (data.response || []).map((game) => ({
-      home: game.teams?.home?.name,
-      away: game.teams?.away?.name,
-      status: game.status?.short,
-      date: game.date,
-    }))
-  );
-});
+//   const data = await response.json();
+
+//   // Keep NBA teams only
+//   const nbaOnly = (data.response || []).filter(
+//     (g) => NBA_TEAMS.has(g?.teams?.home?.name) && NBA_TEAMS.has(g?.teams?.away?.name)
+//   );
+
+//   res.json(
+//     nbaOnly.map((game) => ({
+//       home: game.teams.home.name,
+//       away: game.teams.away.name,
+//       status: game.status.short,
+//       date: game.date,
+//     }))
+//   );
+// });
+
+
+// app.get("/api/nfl-today", async (req, res) => {
+//   const today = new Date().toISOString().split("T")[0];
+//   const url = `https://v1.american-football.api-sports.io/games?date=${today}`;
+
+//   const response = await fetch(url, {
+//     headers: { "x-apisports-key": API_KEY },
+//   });
+
+//   if (!response.ok) {
+//     return res.status(response.status).json({
+//       error: `API request failed with status ${response.status}: ${response.statusText}`,
+//     });
+//   }
+
+//   const data = await response.json();
+//   res.json(
+//     (data.response || []).map((game) => ({
+//       home: game.teams?.home?.name,
+//       away: game.teams?.away?.name,
+//       status: game.status?.short,
+//       date: game.date,
+//     }))
+//   );
+// });
+
+
+// app.get("/api/mlb-today", async (req, res) => {
+//   const today = new Date().toISOString().split("T")[0];
+//   const url = `https://v1.baseball.api-sports.io/games?date=${today}`;
+
+//   const response = await fetch(url, {
+//     headers: { "x-apisports-key": API_KEY },
+//   });
+
+//   if (!response.ok) {
+//     return res.status(response.status).json({
+//       error: `API request failed with status ${response.status}: ${response.statusText}`,
+//     });
+//   }
+
+//   const data = await response.json();
+//   res.json(
+//     (data.response || []).map((game) => ({
+//       home: game.teams?.home?.name,
+//       away: game.teams?.away?.name,
+//       status: game.status?.short,
+//       date: game.date,
+//     }))
+//   );
+// });
 
 
 // Note: server is started after successful DB connection inside run()
