@@ -64,9 +64,27 @@ async function run() {
     getTodaysGames();
     updateGameResults();
 
-    ViteExpress.listen(app, process.env.PORT || port, () => {
-      console.log(`Server listening on port ${process.env.PORT || port}`);
-    });
+    // Production vs Development server setup
+    const PORT = process.env.PORT || 3000;
+    
+    if (process.env.NODE_ENV === 'production') {
+      // Serve static files in production
+      app.use(express.static(path.join(__dirname, 'dist')));
+      
+      // Catch-all route for SPA (must be after API routes)
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+      });
+      
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Production server listening on port ${PORT}`);
+      });
+    } else {
+      // Development with Vite
+      ViteExpress.listen(app, PORT, () => {
+        console.log(`Development server listening on port ${PORT}`);
+      });
+    }
   } catch (err) {
     console.error('Failed to connect to MongoDB', err);
     process.exit(1);
