@@ -67,6 +67,7 @@ async function run() {
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
     getTodaysGames();
+    updateGameResults(); // Check for any finished games on startup
 
     // Start the server only after DB is connected
     ViteExpress.listen(app, process.env.PORT || port, () => {
@@ -128,7 +129,7 @@ app.get("/api/placed-bets", async (req, res) => {
         }
       },
       { $unwind: "$game" },     // flatten the joined array
-      { $sort: { id: -1 }}      // sort by id
+      { $sort: { id: -1 }}      // sort by id (most recent first)
     ]).toArray();
 
     res.json(bets);
@@ -208,10 +209,17 @@ app.post("/api/balance/deduct", async (req, res) => {
 cron.schedule("0 * * * *", async () => {
   console.log("Running sports data sync...")
   await getTodaysGames();
+  await updateGameResults();
+});
+
+// Cron job to check game results every 15 minutes
+cron.schedule("*/15 * * * *", async () => {
+  console.log("Checking for finished games...")
+  await updateGameResults();
 });
 
 
-// Make sure no odss are null
+// Make sure no odds are null
 function parseOdds(value) {
   return value === undefined || value === null ? null : Number(value);
 }
@@ -238,7 +246,6 @@ export async function getTodaysGames() {
   ];
 
   const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-  //const formattedGames = [];
 
   for (const { sport, endpoint } of sports) {
     const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
@@ -279,88 +286,162 @@ export async function getTodaysGames() {
 }
 
 
-// app.get("/api/nba-today", async (req, res) => {
-//   const today = new Date().toISOString().split("T")[0];
-//   const url = `https://v1.basketball.api-sports.io/games?date=${today}`;
+// New function to update game results and process bets
+async function updateGameResults() {
+  console.log("Checking game results and updating bets...");
+  
+  try {
+    // Get all games from database that don't have a winner yet
+    const pendingGames = await games_collection.find({ winner: { $exists: false } }).toArray();
+    
+    if (pendingGames.length === 0) {
+      console.log("No pending games to check");
+      return;
+    }
 
-//   const response = await fetch(url, {
-//     headers: { "x-apisports-key": API_KEY },
-//   });
+    // Check each game for results
+    for (const game of pendingGames) {
+      // Determine which API endpoint to use based on sport
+      let endpoint = "";
+      if (game.sport === "NBA") endpoint = "nba/scores/json/GamesByDate";
+      else if (game.sport === "NHL") endpoint = "nhl/scores/json/GamesByDate";
+      else if (game.sport === "MLB") endpoint = "mlb/scores/json/GamesByDate";
+      else continue;
 
-//   if (!response.ok) {
-//     return res.status(response.status).json({
-//       error: `API request failed with status ${response.status}: ${response.statusText}`,
-//     });
-//   }
+      // Fetch game details from API
+      const today = new Date().toISOString().split("T")[0];
+      const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
+      
+      try {
+        const response = await fetch(url);
+        if (!response.ok) continue;
+        
+        const data = await response.json();
+        
+        // Find this specific game in the API results
+        const apiGame = data.find(g => g.GlobalGameId === game.id);
+        if (!apiGame) continue;
 
-//   const data = await response.json();
+        // Check if game is finished
+        const isFinished = apiGame.Status === "Final" || apiGame.Status === "F";
+        
+        if (isFinished) {
+          // Determine winner
+          let winner = null;
+          if (apiGame.HomeScore > apiGame.AwayScore) {
+            winner = "home";
+          } else if (apiGame.AwayScore > apiGame.HomeScore) {
+            winner = "away";
+          }
+          // If scores are tied, winner stays null
 
-//   // Keep NBA teams only
-//   const nbaOnly = (data.response || []).filter(
-//     (g) => NBA_TEAMS.has(g?.teams?.home?.name) && NBA_TEAMS.has(g?.teams?.away?.name)
-//   );
+          // Update game with winner
+          await games_collection.updateOne(
+            { id: game.id },
+            { $set: { winner: winner, status: "finished" } }
+          );
 
-//   res.json(
-//     nbaOnly.map((game) => ({
-//       home: game.teams.home.name,
-//       away: game.teams.away.name,
-//       status: game.status.short,
-//       date: game.date,
-//     }))
-//   );
-// });
+          console.log(`Game ${game.id} finished. Winner: ${winner || "tie"}`);
 
+          // Process all bets on this game
+          await processBetsForGame(game.id, winner);
+        }
+      } catch (err) {
+        console.error(`Error checking game ${game.id}:`, err.message);
+      }
+    }
 
-// app.get("/api/nfl-today", async (req, res) => {
-//   const today = new Date().toISOString().split("T")[0];
-//   const url = `https://v1.american-football.api-sports.io/games?date=${today}`;
+    // Delete old finished games (older than 7 days) that have no bets
+    await cleanupOldGames();
 
-//   const response = await fetch(url, {
-//     headers: { "x-apisports-key": API_KEY },
-//   });
-
-//   if (!response.ok) {
-//     return res.status(response.status).json({
-//       error: `API request failed with status ${response.status}: ${response.statusText}`,
-//     });
-//   }
-
-//   const data = await response.json();
-//   res.json(
-//     (data.response || []).map((game) => ({
-//       home: game.teams?.home?.name,
-//       away: game.teams?.away?.name,
-//       status: game.status?.short,
-//       date: game.date,
-//     }))
-//   );
-// });
+  } catch (err) {
+    console.error("Error in updateGameResults:", err);
+  }
+}
 
 
-// app.get("/api/mlb-today", async (req, res) => {
-//   const today = new Date().toISOString().split("T")[0];
-//   const url = `https://v1.baseball.api-sports.io/games?date=${today}`;
+// Process all bets for a finished game
+async function processBetsForGame(gameId, winner) {
+  try {
+    // Find all pending bets for this game
+    const bets = await placedBets_collection.find({ 
+      gameId: gameId, 
+      status: "pending" 
+    }).toArray();
 
-//   const response = await fetch(url, {
-//     headers: { "x-apisports-key": API_KEY },
-//   });
+    if (bets.length === 0) return;
 
-//   if (!response.ok) {
-//     return res.status(response.status).json({
-//       error: `API request failed with status ${response.status}: ${response.statusText}`,
-//     });
-//   }
+    console.log(`Processing ${bets.length} bets for game ${gameId}`);
 
-//   const data = await response.json();
-//   res.json(
-//     (data.response || []).map((game) => ({
-//       home: game.teams?.home?.name,
-//       away: game.teams?.away?.name,
-//       status: game.status?.short,
-//       date: game.date,
-//     }))
-//   );
-// });
+    for (const bet of bets) {
+      let newStatus = "lost";
+      let payout = 0;
+
+      // Check if bet won
+      if (bet.bet === winner) {
+        newStatus = "won";
+        
+        // Get the game to find odds
+        const game = await games_collection.findOne({ id: gameId });
+        if (game) {
+          const odds = bet.bet === "home" ? game.homeOdds : game.awayOdds;
+          
+          // Calculate payout
+          if (odds > 0) {
+            payout = bet.amount + (bet.amount * odds) / 100;
+          } else {
+            payout = bet.amount + (bet.amount * 100) / Math.abs(odds);
+          }
+          
+          // Add winnings to balance
+          await balance_collection.updateOne(
+            {},
+            { $inc: { amount: payout } }
+          );
+          
+          console.log(`Bet ${bet.id} won! Payout: $${payout.toFixed(2)}`);
+        }
+      } else {
+        console.log(`Bet ${bet.id} lost.`);
+      }
+
+      // Update bet status
+      await placedBets_collection.updateOne(
+        { id: bet.id },
+        { $set: { status: newStatus } }
+      );
+    }
+  } catch (err) {
+    console.error(`Error processing bets for game ${gameId}:`, err);
+  }
+}
+
+
+// Delete old finished games (older than 7 days) unless someone bet on them
+async function cleanupOldGames() {
+  try {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Find finished games older than 7 days
+    const oldGames = await games_collection.find({
+      status: "finished"
+    }).toArray();
+
+    for (const game of oldGames) {
+      // Check if anyone bet on this game
+      const hasBets = await placedBets_collection.findOne({ gameId: game.id });
+      
+      // Only delete if no bets exist
+      if (!hasBets) {
+        await games_collection.deleteOne({ id: game.id });
+        console.log(`Deleted old game ${game.id}`);
+      }
+    }
+  } catch (err) {
+    console.error("Error cleaning up old games:", err);
+  }
+}
 
 
 // Note: server is started after successful DB connection inside run()
