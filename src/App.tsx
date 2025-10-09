@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useAuth0 } from '@auth0/auth0-react'
 
 type Game = {
     id: number
@@ -13,7 +14,7 @@ type Game = {
 
 type PlacedBet = {
     id: number
-    game: Game, 
+    game: Game
     bet: 'home' | 'away'
     amount: number
     status: 'pending' | 'won' | 'lost'
@@ -21,61 +22,104 @@ type PlacedBet = {
 }
 
 type Balance = {
-    _id: string;
-    amount: number;
+    _id?: string
+    userId: string
+    amount: number
 }
 
+type BetTeam = 'home' | 'away'
 
 export default function App() {
-    const [balance, setBalance] = useState<Balance | null>(null);
-    const [placedBets, setPlacedBets] = useState<PlacedBet[]>([]);
+    const { loginWithRedirect, logout, user, isAuthenticated, isLoading } = useAuth0()
+    
+    const [balance, setBalance] = useState<Balance | null>(null)
+    const [placedBets, setPlacedBets] = useState<PlacedBet[]>([])
     const [games, setGames] = useState<Game[]>([])
     const [loading, setLoading] = useState(true)
 
+    // Helper function to get headers with user ID
+    const getHeaders = () => {
+        return {
+            'Content-Type': 'application/json',
+            'x-user-id': user?.email || user?.sub || 'anonymous'
+        }
+    }
 
     useEffect(() => {
-        const load = async () => {
-            try {
-                // Fetch balance, games and bets
-                const [balanceRes, gamesRes, betsRes] = await Promise.all([
-                    fetch("/api/balance"),
-                    fetch("/api/games"),
-                    fetch("/api/placed-bets"),
-                ]);
+        if (isAuthenticated && user) {
+            const load = async () => {
+                try {
+                    const headers = getHeaders()
+                    
+                    // Fetch balance, games and bets
+                    const [balanceRes, gamesRes, betsRes] = await Promise.all([
+                        fetch("/api/balance", { headers }),
+                        fetch("/api/games"),
+                        fetch("/api/placed-bets", { headers }),
+                    ])
 
-                const [balanceJson, gamesJson, betsJson] = await Promise.all([
-                    balanceRes.json(),
-                    gamesRes.json(),
-                    betsRes.json(),
-                ]);
+                    const [balanceJson, gamesJson, betsJson] = await Promise.all([
+                        balanceRes.json(),
+                        gamesRes.json(),
+                        betsRes.json(),
+                    ])
 
-                setBalance(balanceJson);
-                setGames(gamesJson);
-                setPlacedBets(betsJson);
-            } catch (err) {
-                console.error('Failed to load data', err)
-            } finally {
-                setLoading(false)
+                    setBalance(balanceJson)
+                    setGames(gamesJson)
+                    setPlacedBets(betsJson)
+                } catch (err) {
+                    console.error('Failed to load data', err)
+                } finally {
+                    setLoading(false)
+                }
             }
+            load()
         }
-        load()  // Called upon loading app
-    }, [])
+    }, [isAuthenticated, user])
+
+    // Show loading screen while Auth0 is checking authentication
+    if (isLoading) {
+        return (
+            <div className="container py-5 text-center">
+                <h2>Loading...</h2>
+            </div>
+        )
+    }
+
+    // Show login screen if not authenticated
+    if (!isAuthenticated) {
+        return (
+            <div className="container py-5">
+                <div className="row justify-content-center">
+                    <div className="col-md-6 text-center">
+                        <h1 className="display-4 mb-4">Webware Betting</h1>
+                        <p className="lead mb-4">Welcome to the sports betting platform</p>
+                        <p className="text-muted mb-4">Sign in to place bets on NBA, NHL, and MLB games</p>
+                        <button 
+                            className="btn btn-primary btn-lg"
+                            onClick={() => loginWithRedirect()}
+                        >
+                            Sign In / Sign Up
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )
+    }
 
     // Button to handle money
     const handleAddMoney = async () => {
-        const amount = 1000;
+        const amount = 1000
         const res = await fetch("/api/balance/add", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: getHeaders(),
           body: JSON.stringify({ amount }),
-        });
-        const updated = await res.json();
-        setBalance(updated);
-      };
-      
+        })
+        const updated = await res.json()
+        setBalance(updated)
+    }
 
-    const handleBet = async (gameId: number, team: 'home' | 'away', odds: number) => {
-        // Prompt user for amount and place bet
+    const handleBet = async (gameId: number, team: BetTeam, odds: number) => {
         const amountStr = window.prompt('Enter wager amount in USD', '100')
         if (!amountStr) return
 
@@ -84,7 +128,7 @@ export default function App() {
             window.alert('Please enter a valid amount')
             return
         }
-        if (amount > balance.amount) {
+        if (!balance || amount > balance.amount) {
             window.alert('Insufficient balance')
             return
         }
@@ -96,21 +140,20 @@ export default function App() {
         try {
             const res = await fetch('/api/place-bet', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getHeaders(),
                 body: JSON.stringify({ gameId, bet: team, amount })
             })
             if (!res.ok) throw new Error('Failed to place bet')
             const placed = await res.json()
-            setPlacedBets((s) => [placed, ...s])  // Update placedBet useState 
+            setPlacedBets((s) => [placed, ...s])
 
-            // Call post to update balance
             const res2 = await fetch("/api/balance/deduct", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: getHeaders(),
                 body: JSON.stringify({ amount }),
             })
-            const updated = await res2.json();
-            setBalance(updated);
+            const updated = await res2.json()
+            setBalance(updated)
 
             window.alert(`Bet placed on ${team === 'home' ? game.homeTeam : game.awayTeam} for $${amount}`)
         } catch (err) {
@@ -133,10 +176,19 @@ export default function App() {
             <div className="d-flex justify-content-between align-items-center mb-4">
                 <h2 className="h3">Webware Betting</h2>
                 <div className="d-flex align-items-center gap-3">
+                    <div className="text-end">
+                        <div className="small text-muted">Welcome, {user?.name || user?.email}</div>
+                        <button 
+                            className="btn btn-sm btn-link p-0"
+                            onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
+                        >
+                            Logout
+                        </button>
+                    </div>
                     <div className="text-end border rounded p-3">
                         <div className="small text-muted">Balance</div>
                         <div className="h4 mb-0">
-                            {loading ? "Loading..." : `${balance?.amount?.toLocaleString()}`}
+                            {loading ? "Loading..." : `$${balance?.amount?.toLocaleString()}`}
                         </div>
                     </div>
                     <button className="btn btn-primary btn-lg rounded-circle" onClick={handleAddMoney} title="Add money">+</button>

@@ -45,21 +45,22 @@ const client = new MongoClient(uri, {
 });
 
 // Make collection accessible to middleware/routes
-let balance_collection = null;
+let users_collection = null;
 let games_collection = null;
 let placedBets_collection = null;
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
+    // Connect the client to the server
     await client.connect();
-    // Assign to the module-scoped variable so middleware/routes can use it
-    balance_collection = client.db("final_project").collection("balance");
+    
+    // Updated collections - now we have users instead of balance
+    users_collection = client.db("final_project").collection("users");
     games_collection = client.db("final_project").collection("games");
     placedBets_collection = client.db("final_project").collection("placedBets");
 
-    if (balance_collection !== null && games_collection !== null && placedBets_collection !== null) {
-      console.log("Collections exists");
+    if (users_collection !== null && games_collection !== null && placedBets_collection !== null) {
+      console.log("Collections exist");
     }
 
     // Send a ping to confirm a successful connection
@@ -84,7 +85,7 @@ run().catch((err) => {
 });
 
 app.use((req, res, next) => {
-  if (balance_collection !== null && games_collection !== null && placedBets_collection !== null){
+  if (users_collection !== null && games_collection !== null && placedBets_collection !== null){
     next();
   } else {
     res.status(503).send("Not all collections exist");
@@ -92,12 +93,16 @@ app.use((req, res, next) => {
 });
 
 
+// Middleware to extract user ID from Auth0 token
+// For now, we'll use a simple approach where the frontend sends the user email
+// In a production app, you'd verify the JWT token
+function getUserId(req) {
+  // Get user ID from header (sent by frontend)
+  return req.headers['x-user-id'] || 'anonymous';
+}
 
-// All of these currently use JSON files in ./data for simplicity
-// They should be replaced with db queries
-// Also need to add user id to each bet placed after auth is added
 
-// Serve games and placed bets from local JSON files for now
+// Serve games and placed bets
 import fs from 'fs/promises'
 const DATA_DIR = path.join(__dirname, 'data')
 
@@ -118,18 +123,21 @@ app.get('/api/games', async (req, res) => {
 
 app.get("/api/placed-bets", async (req, res) => {
   try {
-    // Get bets and map them to existing games
+    const userId = getUserId(req);
+    
+    // Get bets for this specific user and map them to existing games
     const bets = await placedBets_collection.aggregate([
+      { $match: { userId: userId } }, // Filter by user
       {
         $lookup: {
-          from: "games",         // the other collection name
-          localField: "gameId",  // field in placedBets
-          foreignField: "id",    // matching field in games
+          from: "games",
+          localField: "gameId",
+          foreignField: "id",
           as: "game"
         }
       },
-      { $unwind: "$game" },     // flatten the joined array
-      { $sort: { id: -1 }}      // sort by id (most recent first)
+      { $unwind: "$game" },
+      { $sort: { id: -1 }}
     ]).toArray();
 
     res.json(bets);
@@ -143,7 +151,9 @@ app.get("/api/placed-bets", async (req, res) => {
 
 app.post('/api/place-bet', async (req, res) => {
   try {
+    const userId = getUserId(req);
     const { gameId, bet, amount } = req.body
+    
     if (!gameId || !bet || !amount) return res.status(400).json({ error: 'Missing fields' })
 
     // Validate that the game exists
@@ -155,9 +165,10 @@ app.post('/api/place-bet', async (req, res) => {
     const last = await placedBets_collection.findOne({}, { sort: { id: -1 } });
     const newId = last ? last.id + 1 : 1;
 
-    // Create new bet
+    // Create new bet with userId
     const newBet = {
       id: newId,
+      userId: userId,
       gameId,
       bet,
       amount,
@@ -175,12 +186,26 @@ app.post('/api/place-bet', async (req, res) => {
 })
 
 
-// Balance API --------------------------
+// Balance API - now user-specific --------------------------
 
 app.get("/api/balance", async (req, res) => {
   try {
-    const balance = await balance_collection.findOne();
-    res.json(balance);
+    const userId = getUserId(req);
+    
+    // Find or create user
+    let user = await users_collection.findOne({ userId: userId });
+    
+    if (!user) {
+      // Create new user with starting balance
+      user = {
+        userId: userId,
+        amount: 10000,
+        createdAt: new Date()
+      };
+      await users_collection.insertOne(user);
+    }
+    
+    res.json(user);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to get balance" });
@@ -188,17 +213,39 @@ app.get("/api/balance", async (req, res) => {
 });
 
 app.post("/api/balance/add", async (req, res) => {
-  const { amount } = req.body;
-  await balance_collection.updateOne({}, { $inc: { amount } });
-  const updated = await balance_collection.findOne();
-  res.json(updated);
+  try {
+    const userId = getUserId(req);
+    const { amount } = req.body;
+    
+    await users_collection.updateOne(
+      { userId: userId },
+      { $inc: { amount } }
+    );
+    
+    const updated = await users_collection.findOne({ userId: userId });
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to add balance" });
+  }
 });
 
 app.post("/api/balance/deduct", async (req, res) => {
-  const { amount } = req.body;
-  await balance_collection.updateOne({}, { $inc: { amount: -amount } });
-  const updated = await balance_collection.findOne();
-  res.json(updated);
+  try {
+    const userId = getUserId(req);
+    const { amount } = req.body;
+    
+    await users_collection.updateOne(
+      { userId: userId },
+      { $inc: { amount: -amount } }
+    );
+    
+    const updated = await users_collection.findOne({ userId: userId });
+    res.json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to deduct balance" });
+  }
 });
 
 
@@ -259,7 +306,7 @@ export async function getTodaysGames() {
         const firstOdds = game.PregameOdds?.[0] || {};
 
         const formatted = {
-          id: game.GlobalGameId, // globally unique ID across all sports
+          id: game.GlobalGameId,
           sport,
           homeTeam: game.HomeTeamName || game.HomeTeam || "Unknown",
           awayTeam: game.AwayTeamName || game.AwayTeam || "Unknown",
@@ -268,16 +315,14 @@ export async function getTodaysGames() {
           awayOdds: parseOdds(firstOdds.AwayMoneyLine),
         };
 
-        // Upsert ensures no duplicates — updates if exists, inserts otherwise
         const result = await games_collection.updateOne(
           { id: Number(game.GlobalGameId) },
           { $set: formatted },
           { upsert: true }
         );
 
-        if (result.upsertedCount > 0) console.log("Inserted new");
-        else if (result.modifiedCount > 0) console.log("Updated existing");
-        else console.log("No changes");
+        if (result.upsertedCount > 0) console.log("Inserted new game");
+        else if (result.modifiedCount > 0) console.log("Updated existing game");
       }
     } catch (err) {
       console.error(`Error fetching ${sport} games:`, err.message);
@@ -291,7 +336,6 @@ async function updateGameResults() {
   console.log("Checking game results and updating bets...");
   
   try {
-    // Get all games from database that don't have a winner yet
     const pendingGames = await games_collection.find({ winner: { $exists: false } }).toArray();
     
     if (pendingGames.length === 0) {
@@ -299,16 +343,13 @@ async function updateGameResults() {
       return;
     }
 
-    // Check each game for results
     for (const game of pendingGames) {
-      // Determine which API endpoint to use based on sport
       let endpoint = "";
       if (game.sport === "NBA") endpoint = "nba/scores/json/GamesByDate";
       else if (game.sport === "NHL") endpoint = "nhl/scores/json/GamesByDate";
       else if (game.sport === "MLB") endpoint = "mlb/scores/json/GamesByDate";
       else continue;
 
-      // Fetch game details from API
       const today = new Date().toISOString().split("T")[0];
       const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
       
@@ -317,33 +358,25 @@ async function updateGameResults() {
         if (!response.ok) continue;
         
         const data = await response.json();
-        
-        // Find this specific game in the API results
         const apiGame = data.find(g => g.GlobalGameId === game.id);
         if (!apiGame) continue;
 
-        // Check if game is finished
         const isFinished = apiGame.Status === "Final" || apiGame.Status === "F";
         
         if (isFinished) {
-          // Determine winner
           let winner = null;
           if (apiGame.HomeScore > apiGame.AwayScore) {
             winner = "home";
           } else if (apiGame.AwayScore > apiGame.HomeScore) {
             winner = "away";
           }
-          // If scores are tied, winner stays null
 
-          // Update game with winner
           await games_collection.updateOne(
             { id: game.id },
             { $set: { winner: winner, status: "finished" } }
           );
 
           console.log(`Game ${game.id} finished. Winner: ${winner || "tie"}`);
-
-          // Process all bets on this game
           await processBetsForGame(game.id, winner);
         }
       } catch (err) {
@@ -351,7 +384,6 @@ async function updateGameResults() {
       }
     }
 
-    // Delete old finished games (older than 7 days) that have no bets
     await cleanupOldGames();
 
   } catch (err) {
@@ -363,7 +395,6 @@ async function updateGameResults() {
 // Process all bets for a finished game
 async function processBetsForGame(gameId, winner) {
   try {
-    // Find all pending bets for this game
     const bets = await placedBets_collection.find({ 
       gameId: gameId, 
       status: "pending" 
@@ -377,35 +408,31 @@ async function processBetsForGame(gameId, winner) {
       let newStatus = "lost";
       let payout = 0;
 
-      // Check if bet won
       if (bet.bet === winner) {
         newStatus = "won";
         
-        // Get the game to find odds
         const game = await games_collection.findOne({ id: gameId });
         if (game) {
           const odds = bet.bet === "home" ? game.homeOdds : game.awayOdds;
           
-          // Calculate payout
           if (odds > 0) {
             payout = bet.amount + (bet.amount * odds) / 100;
           } else {
             payout = bet.amount + (bet.amount * 100) / Math.abs(odds);
           }
           
-          // Add winnings to balance
-          await balance_collection.updateOne(
-            {},
+          // Add winnings to the user's balance
+          await users_collection.updateOne(
+            { userId: bet.userId },
             { $inc: { amount: payout } }
           );
           
-          console.log(`Bet ${bet.id} won! Payout: $${payout.toFixed(2)}`);
+          console.log(`Bet ${bet.id} won! User ${bet.userId} receives payout: $${payout.toFixed(2)}`);
         }
       } else {
         console.log(`Bet ${bet.id} lost.`);
       }
 
-      // Update bet status
       await placedBets_collection.updateOne(
         { id: bet.id },
         { $set: { status: newStatus } }
@@ -423,16 +450,13 @@ async function cleanupOldGames() {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-    // Find finished games older than 7 days
     const oldGames = await games_collection.find({
       status: "finished"
     }).toArray();
 
     for (const game of oldGames) {
-      // Check if anyone bet on this game
       const hasBets = await placedBets_collection.findOne({ gameId: game.id });
       
-      // Only delete if no bets exist
       if (!hasBets) {
         await games_collection.deleteOne({ id: game.id });
         console.log(`Deleted old game ${game.id}`);
