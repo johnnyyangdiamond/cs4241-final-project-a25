@@ -6,8 +6,8 @@ import ViteExpress from "vite-express"
 import fetch from "node-fetch";
 import cron from "node-cron";
 import { MongoClient, ServerApiVersion } from "mongodb";
-
 import dotenv from "dotenv";
+
 dotenv.config();
 
 const app = express()
@@ -19,23 +19,11 @@ const dir  = "src/",
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const NBA_TEAMS = new Set([
-  "Atlanta Hawks","Boston Celtics","Brooklyn Nets","Charlotte Hornets","Chicago Bulls",
-  "Cleveland Cavaliers","Dallas Mavericks","Denver Nuggets","Detroit Pistons","Golden State Warriors",
-  "Houston Rockets","Indiana Pacers","LA Clippers","Los Angeles Lakers","Memphis Grizzlies",
-  "Miami Heat","Milwaukee Bucks","Minnesota Timberwolves","New Orleans Pelicans","New York Knicks",
-  "Oklahoma City Thunder","Orlando Magic","Philadelphia 76ers","Phoenix Suns","Portland Trail Blazers",
-  "Sacramento Kings","San Antonio Spurs","Toronto Raptors","Utah Jazz","Washington Wizards"
-]);
-
 const API_KEY = process.env.API_KEY;
 
-
-// Mongo DB setup -------------------------
-
+// Mongo DB setup
 const uri = `mongodb+srv://${process.env.USERNM}:${process.env.PASS}@${process.env.HOST}/?retryWrites=true&w=majority&appName=sportsCluster`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -44,33 +32,38 @@ const client = new MongoClient(uri, {
   }
 });
 
-// Make collection accessible to middleware/routes
 let users_collection = null;
 let games_collection = null;
 let placedBets_collection = null;
 
 async function run() {
   try {
-    // Connect the client to the server
     await client.connect();
     
-    // Updated collections - now we have users instead of balance
     users_collection = client.db("final_project").collection("users");
     games_collection = client.db("final_project").collection("games");
     placedBets_collection = client.db("final_project").collection("placedBets");
+
+    try {
+      await users_collection.createIndex({ userId: 1 }, { unique: true });
+      await games_collection.createIndex({ id: 1 }, { unique: true });
+      await placedBets_collection.createIndex({ userId: 1 });
+      await placedBets_collection.createIndex({ gameId: 1 });
+      await placedBets_collection.createIndex({ status: 1 });
+    } catch (e) {
+      // Indexes might already exist
+    }
 
     if (users_collection !== null && games_collection !== null && placedBets_collection !== null) {
       console.log("Collections exist");
     }
 
-    // Send a ping to confirm a successful connection
     await client.db("final_project").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
     getTodaysGames();
-    updateGameResults(); // Check for any finished games on startup
+    updateGameResults();
 
-    // Start the server only after DB is connected
     ViteExpress.listen(app, process.env.PORT || port, () => {
       console.log(`Server listening on port ${process.env.PORT || port}`);
     });
@@ -79,9 +72,21 @@ async function run() {
     process.exit(1);
   }
 }
+
 run().catch((err) => {
   console.error(err);
   process.exit(1);
+});
+
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  try {
+    await client.close();
+    process.exit(0);
+  } catch (err) {
+    console.error('Error during shutdown:', err);
+    process.exit(1);
+  }
 });
 
 app.use((req, res, next) => {
@@ -92,24 +97,15 @@ app.use((req, res, next) => {
   }
 });
 
-
-// Middleware to extract user ID from Auth0 token
-// For now, we'll use a simple approach where the frontend sends the user email
-// In a production app, you'd verify the JWT token
 function getUserId(req) {
-  // Get user ID from header (sent by frontend)
-  return req.headers['x-user-id'] || 'anonymous';
+  const userId = req.headers['x-user-id'];
+  if (!userId || userId === 'anonymous') {
+    throw new Error('User not authenticated');
+  }
+  return userId;
 }
 
-
-// Serve games and placed bets
-import fs from 'fs/promises'
-const DATA_DIR = path.join(__dirname, 'data')
-
-
-
-// Games + bets API ------------------------------------
-
+// Games API
 app.get('/api/games', async (req, res) => {
   try {
     const games = await games_collection.find({}).toArray();
@@ -120,14 +116,13 @@ app.get('/api/games', async (req, res) => {
   }
 })
 
-
+// Bets API
 app.get("/api/placed-bets", async (req, res) => {
   try {
     const userId = getUserId(req);
     
-    // Get bets for this specific user and map them to existing games
     const bets = await placedBets_collection.aggregate([
-      { $match: { userId: userId } }, // Filter by user
+      { $match: { userId: userId } },
       {
         $lookup: {
           from: "games",
@@ -143,29 +138,56 @@ app.get("/api/placed-bets", async (req, res) => {
     res.json(bets);
   } catch (err) {
     console.error(err);
+    if (err.message === 'User not authenticated') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
     res.status(500).json({ error: "Failed to fetch placed bets" });
   }
 });
-
-
 
 app.post('/api/place-bet', async (req, res) => {
   try {
     const userId = getUserId(req);
     const { gameId, bet, amount } = req.body
     
-    if (!gameId || !bet || !amount) return res.status(400).json({ error: 'Missing fields' })
+    if (!gameId || !bet || !amount) {
+      return res.status(400).json({ error: 'Missing fields' });
+    }
+    
+    if (typeof amount !== 'number' || amount <= 0 || isNaN(amount)) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
 
-    // Validate that the game exists
+    if (bet !== 'home' && bet !== 'away') {
+      return res.status(400).json({ error: 'Invalid bet side' });
+    }
+
     const game = await games_collection.findOne({ id: gameId });
-    if (!game)
+    if (!game) {
       return res.status(404).json({ error: "Game not found" });
+    }
 
-    // Compute next id
+    if (game.winner !== undefined || game.status === 'finished') {
+      return res.status(400).json({ error: "Cannot bet on finished game" });
+    }
+
+    const odds = bet === 'home' ? game.homeOdds : game.awayOdds;
+    if (odds === null || odds === undefined) {
+      return res.status(400).json({ error: "Odds not available" });
+    }
+
+    const balanceUpdate = await users_collection.updateOne(
+      { userId: userId, amount: { $gte: amount } },
+      { $inc: { amount: -amount } }
+    );
+
+    if (balanceUpdate.modifiedCount === 0) {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+
     const last = await placedBets_collection.findOne({}, { sort: { id: -1 } });
     const newId = last ? last.id + 1 : 1;
 
-    // Create new bet with userId
     const newBet = {
       id: newId,
       userId: userId,
@@ -181,22 +203,21 @@ app.post('/api/place-bet', async (req, res) => {
     res.json({ ...newBet, game });
   } catch (err) {
     console.error(err)
+    if (err.message === 'User not authenticated') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
     res.status(500).json({ error: 'Failed to place bet' })
   }
 })
 
-
-// Balance API - now user-specific --------------------------
-
+// Balance API
 app.get("/api/balance", async (req, res) => {
   try {
     const userId = getUserId(req);
     
-    // Find or create user
     let user = await users_collection.findOne({ userId: userId });
     
     if (!user) {
-      // Create new user with starting balance
       user = {
         userId: userId,
         amount: 10000,
@@ -208,6 +229,9 @@ app.get("/api/balance", async (req, res) => {
     res.json(user);
   } catch (err) {
     console.error(err);
+    if (err.message === 'User not authenticated') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
     res.status(500).json({ error: "Failed to get balance" });
   }
 });
@@ -216,6 +240,10 @@ app.post("/api/balance/add", async (req, res) => {
   try {
     const userId = getUserId(req);
     const { amount } = req.body;
+    
+    if (typeof amount !== 'number' || amount <= 0 || isNaN(amount)) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
     
     await users_collection.updateOne(
       { userId: userId },
@@ -226,6 +254,9 @@ app.post("/api/balance/add", async (req, res) => {
     res.json(updated);
   } catch (err) {
     console.error(err);
+    if (err.message === 'User not authenticated') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
     res.status(500).json({ error: "Failed to add balance" });
   }
 });
@@ -234,6 +265,10 @@ app.post("/api/balance/deduct", async (req, res) => {
   try {
     const userId = getUserId(req);
     const { amount } = req.body;
+    
+    if (typeof amount !== 'number' || amount <= 0 || isNaN(amount)) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
     
     await users_collection.updateOne(
       { userId: userId },
@@ -244,45 +279,54 @@ app.post("/api/balance/deduct", async (req, res) => {
     res.json(updated);
   } catch (err) {
     console.error(err);
+    if (err.message === 'User not authenticated') {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
     res.status(500).json({ error: "Failed to deduct balance" });
   }
 });
 
-
-// Sports API ---------------------------------
-
-
-//Cron job to update games every hour
+// Cron jobs
 cron.schedule("0 * * * *", async () => {
-  console.log("Running sports data sync...")
-  await getTodaysGames();
-  await updateGameResults();
+  try {
+    console.log("Running sports data sync...")
+    await getTodaysGames();
+    await updateGameResults();
+  } catch (err) {
+    console.error("Error in hourly sync:", err);
+  }
 });
 
-// Cron job to check game results every 15 minutes
 cron.schedule("*/15 * * * *", async () => {
-  console.log("Checking for finished games...")
-  await updateGameResults();
+  try {
+    console.log("Checking for finished games...")
+    await updateGameResults();
+  } catch (err) {
+    console.error("Error checking game results:", err);
+  }
 });
 
-
-// Make sure no odds are null
+// Helper functions
 function parseOdds(value) {
   return value === undefined || value === null ? null : Number(value);
 }
 
-// Format time like "Today, 7:30 PM"
 function formatGameTime(dateString) {
   if (!dateString) return "TBD";
-  const date = new Date(dateString);
-  const now = new Date();
-  const sameDay =
-    date.getDate() === now.getDate() &&
-    date.getMonth() === now.getMonth() &&
-    date.getFullYear() === now.getFullYear();
-  const label = sameDay ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
-  const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  return `${label}, ${time}`;
+  try {
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) return "TBD";
+    const now = new Date();
+    const sameDay =
+      date.getDate() === now.getDate() &&
+      date.getMonth() === now.getMonth() &&
+      date.getFullYear() === now.getFullYear();
+    const label = sameDay ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
+    const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    return `${label}, ${time}`;
+  } catch (err) {
+    return "TBD";
+  }
 }
 
 export async function getTodaysGames() {
@@ -292,7 +336,7 @@ export async function getTodaysGames() {
     { sport: "MLB", endpoint: "mlb/odds/json/GameOddsByDate" },
   ];
 
-  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  const today = new Date().toISOString().split("T")[0];
 
   for (const { sport, endpoint } of sports) {
     const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
@@ -315,14 +359,11 @@ export async function getTodaysGames() {
           awayOdds: parseOdds(firstOdds.AwayMoneyLine),
         };
 
-        const result = await games_collection.updateOne(
-          { id: Number(game.GlobalGameId) },
+        await games_collection.updateOne(
+          { id: Number(game.GlobalGameId), winner: { $exists: false } },
           { $set: formatted },
           { upsert: true }
         );
-
-        if (result.upsertedCount > 0) console.log("Inserted new game");
-        else if (result.modifiedCount > 0) console.log("Updated existing game");
       }
     } catch (err) {
       console.error(`Error fetching ${sport} games:`, err.message);
@@ -330,8 +371,6 @@ export async function getTodaysGames() {
   }
 }
 
-
-// New function to update game results and process bets
 async function updateGameResults() {
   console.log("Checking game results and updating bets...");
   
@@ -373,7 +412,13 @@ async function updateGameResults() {
 
           await games_collection.updateOne(
             { id: game.id },
-            { $set: { winner: winner, status: "finished" } }
+            { 
+              $set: { 
+                winner: winner, 
+                status: "finished",
+                finishedAt: new Date()
+              } 
+            }
           );
 
           console.log(`Game ${game.id} finished. Winner: ${winner || "tie"}`);
@@ -391,8 +436,6 @@ async function updateGameResults() {
   }
 }
 
-
-// Process all bets for a finished game
 async function processBetsForGame(gameId, winner) {
   try {
     const bets = await placedBets_collection.find({ 
@@ -415,13 +458,15 @@ async function processBetsForGame(gameId, winner) {
         if (game) {
           const odds = bet.bet === "home" ? game.homeOdds : game.awayOdds;
           
-          if (odds > 0) {
+          if (odds === null || odds === undefined) {
+            console.error(`Missing odds for game ${gameId}, returning original bet`);
+            payout = bet.amount;
+          } else if (odds > 0) {
             payout = bet.amount + (bet.amount * odds) / 100;
           } else {
             payout = bet.amount + (bet.amount * 100) / Math.abs(odds);
           }
           
-          // Add winnings to the user's balance
           await users_collection.updateOne(
             { userId: bet.userId },
             { $inc: { amount: payout } }
@@ -443,15 +488,14 @@ async function processBetsForGame(gameId, winner) {
   }
 }
 
-
-// Delete old finished games (older than 7 days) unless someone bet on them
 async function cleanupOldGames() {
   try {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
     const oldGames = await games_collection.find({
-      status: "finished"
+      status: "finished",
+      finishedAt: { $lt: sevenDaysAgo }
     }).toArray();
 
     for (const game of oldGames) {
@@ -466,6 +510,3 @@ async function cleanupOldGames() {
     console.error("Error cleaning up old games:", err);
   }
 }
-
-
-// Note: server is started after successful DB connection inside run()
