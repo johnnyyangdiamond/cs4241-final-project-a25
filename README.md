@@ -30,6 +30,7 @@ Simply visit the live application link and click "Sign In / Sign Up" to authenti
 - Aarogya: Developed the frontend completely, designed database schema.
 - Aanan: Auth0 integration, cron jobs for game updates and bet processing, Render Deployment, backend API development.
 - John: Integrated backend with MongoDB as well as API calls to sportsdata.io
+- Theo: Auth0 integration and cron jobs
 
 
 ## Accessibility Features
