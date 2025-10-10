@@ -64,6 +64,7 @@ async function run() {
     // Initial data load
     await getTodaysGames();
     await updateGameResults();
+    await cleanupStaleGames(); // Run cleanup on startup
 
     // Production vs Development server setup
     const PORT = process.env.PORT || 3000;
@@ -199,6 +200,16 @@ app.post('/api/admin/cleanup-old-games', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to cleanup old games' });
+  }
+});
+
+// NEW: Admin endpoint to clean up stale games
+app.post('/api/admin/cleanup-stale', async (req, res) => {
+  try {
+    const cleaned = await cleanupStaleGames();
+    res.json({ success: true, cleaned });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -399,12 +410,13 @@ app.post("/api/balance/deduct", async (req, res) => {
   }
 });
 
-// Cron jobs - every 15 minutes and hourly
+// Updated Cron jobs
 cron.schedule("0 * * * *", async () => {
   try {
     console.log("Running hourly sports data sync...")
     await getTodaysGames();
     await updateGameResults();
+    await cleanupStaleGames();
   } catch (err) {
     console.error("Error in hourly sync:", err);
   }
@@ -416,6 +428,15 @@ cron.schedule("*/15 * * * *", async () => {
     await updateGameResults();
   } catch (err) {
     console.error("Error checking game results:", err);
+  }
+});
+
+cron.schedule("0 */6 * * *", async () => {
+  try {
+    console.log("Running aggressive cleanup...")
+    await cleanupStaleGames();
+  } catch (err) {
+    console.error("Error in aggressive cleanup:", err);
   }
 });
 
@@ -449,37 +470,47 @@ export async function getTodaysGames() {
     { sport: "MLB", endpoint: "mlb/odds/json/GameOddsByDate" },
   ];
 
-  const today = new Date().toISOString().split("T")[0];
+  // Fetch today and yesterday to catch any late-added games
+  const dates = [
+    new Date().toISOString().split("T")[0],
+    new Date(Date.now() - 86400000).toISOString().split("T")[0]
+  ];
 
   for (const { sport, endpoint } of sports) {
-    const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
+    for (const date of dates) {
+      const url = `https://api.sportsdata.io/v3/${endpoint}/${date}?key=${API_KEY}`;
 
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Failed ${sport} request: ${response.status}`);
-      const data = await response.json();
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.log(`Failed ${sport} request for ${date}: ${response.status}`);
+          continue;
+        }
+        const data = await response.json();
 
-      for (const game of data) {
-        const firstOdds = game.PregameOdds?.[0] || {};
+        for (const game of data) {
+          const firstOdds = game.PregameOdds?.[0] || {};
 
-        const formatted = {
-          id: Number(game.GlobalGameId),
-          sport,
-          homeTeam: game.HomeTeamName || game.HomeTeam || "Unknown",
-          awayTeam: game.AwayTeamName || game.AwayTeam || "Unknown",
-          time: formatGameTime(game.DateTime),
-          homeOdds: parseOdds(firstOdds.HomeMoneyLine),
-          awayOdds: parseOdds(firstOdds.AwayMoneyLine),
-        };
+          const formatted = {
+            id: Number(game.GlobalGameId),
+            sport,
+            homeTeam: game.HomeTeamName || game.HomeTeam || "Unknown",
+            awayTeam: game.AwayTeamName || game.AwayTeam || "Unknown",
+            time: formatGameTime(game.DateTime),
+            homeOdds: parseOdds(firstOdds.HomeMoneyLine),
+            awayOdds: parseOdds(firstOdds.AwayMoneyLine),
+          };
 
-        await games_collection.updateOne(
-          { id: Number(game.GlobalGameId), winner: { $exists: false } },
-          { $set: formatted },
-          { upsert: true }
-        );
+          // Only insert if game doesn't have a winner yet
+          await games_collection.updateOne(
+            { id: Number(game.GlobalGameId), winner: { $exists: false } },
+            { $set: formatted },
+            { upsert: true }
+          );
+        }
+      } catch (err) {
+        console.error(`Error fetching ${sport} games for ${date}:`, err.message);
       }
-    } catch (err) {
-      console.error(`Error fetching ${sport} games:`, err.message);
     }
   }
 }
@@ -720,5 +751,93 @@ async function cleanupOldGames() {
     }
   } catch (err) {
     console.error("Error cleaning up old games:", err);
+  }
+}
+
+// NEW: Clean up stale games function
+async function cleanupStaleGames() {
+  try {
+    console.log("Running stale game cleanup...");
+    
+    // Find games that are more than 2 days old and still not finished
+    const twoDaysAgo = new Date(Date.now() - 172800000); // 2 days in ms
+    
+    const staleGames = await games_collection.find({
+      winner: { $exists: false },
+      status: { $ne: "finished" }
+    }).toArray();
+    
+    let cleaned = 0;
+    
+    for (const game of staleGames) {
+      // Try to parse the game time
+      let gameDate;
+      
+      // Handle different time formats
+      if (game.time) {
+        // If it's "Today, 10:00 PM" format
+        if (game.time.includes('Today')) {
+          gameDate = new Date();
+        }
+        // If it contains a weekday like "Wed, 10:00 PM"
+        else if (game.time.match(/^[A-Za-z]{3},/)) {
+          // These are likely old games, mark them as stale
+          gameDate = new Date(Date.now() - 172800001); // Force it to be considered stale
+        }
+        // Try to parse as a date string
+        else {
+          gameDate = new Date(game.time);
+        }
+      }
+      
+      // If we can't parse the date or it's older than 2 days, mark as finished
+      if (!gameDate || isNaN(gameDate.getTime()) || gameDate < twoDaysAgo) {
+        console.log(`Marking stale game as finished: ${game.id} - ${game.awayTeam} vs ${game.homeTeam} (${game.time})`);
+        
+        // Check if there are any bets on this game
+        const pendingBets = await placedBets_collection.find({
+          gameId: game.id,
+          status: "pending"
+        }).toArray();
+        
+        if (pendingBets.length > 0) {
+          // Refund all pending bets
+          for (const bet of pendingBets) {
+            await users_collection.updateOne(
+              { userId: bet.userId },
+              { $inc: { amount: bet.amount } }
+            );
+            
+            await placedBets_collection.updateOne(
+              { id: bet.id },
+              { $set: { status: "refunded", processedAt: new Date() } }
+            );
+          }
+          
+          console.log(`Refunded ${pendingBets.length} bets for stale game ${game.id}`);
+        }
+        
+        // Mark game as finished
+        await games_collection.updateOne(
+          { id: game.id },
+          { 
+            $set: { 
+              status: "finished",
+              winner: null,
+              finishedAt: new Date(),
+              note: "Auto-canceled - stale game"
+            }
+          }
+        );
+        
+        cleaned++;
+      }
+    }
+    
+    console.log(`Cleaned up ${cleaned} stale games`);
+    return cleaned;
+  } catch (err) {
+    console.error("Error cleaning up stale games:", err);
+    return 0;
   }
 }

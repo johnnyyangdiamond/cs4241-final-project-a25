@@ -21,8 +21,7 @@ Simply visit the live application link and click "Sign In / Sign Up" to authenti
 ## Challenges Faced
 
 - All of us were working on the frontend and the backend at the same time creating confusions and inconsistensies around structuring different data in the database, API requests and the frontend. To solve this problem, we used a central json file as an example for everyone to work off of.
-- Implementing cron jobs was challenging due to Render’s free tier pausing inactive processes. Addressed this by adding robust error handling, using MongoDB’s atomic operations to prevent race conditions, and optimizing cron schedules to balance API limits with timely game and bet updates.
-
+- Implementing cron jobs was challenging due to Render’s free tier pausing inactive processes. 
 
 
 ## Team Responsibilities
