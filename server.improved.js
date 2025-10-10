@@ -124,10 +124,96 @@ function getUserId(req) {
   return userId;
 }
 
-// Games API
+// Admin endpoint to clean up old games manually
+app.post('/api/admin/cleanup-old-games', async (req, res) => {
+  try {
+    console.log("Manual cleanup triggered...");
+    
+    // Find all games older than 2 days that don't have a winner
+    const twoDaysAgo = new Date(Date.now() - 172800000);
+    
+    const oldGames = await games_collection.find({
+      winner: { $exists: false },
+      status: { $ne: "finished" }
+    }).toArray();
+    
+    let cleaned = 0;
+    let updated = 0;
+    
+    for (const game of oldGames) {
+      // Parse the game date
+      const gameDate = new Date(game.time);
+      
+      // If game is more than 2 days old and still pending, mark it as finished
+      if (isNaN(gameDate.getTime()) || gameDate < twoDaysAgo) {
+        // Check if there are any bets on this game
+        const betsCount = await placedBets_collection.countDocuments({ gameId: game.id });
+        
+        if (betsCount === 0) {
+          // No bets, just delete the game
+          await games_collection.deleteOne({ id: game.id });
+          cleaned++;
+          console.log(`Deleted old game ${game.id} with no bets`);
+        } else {
+          // Has bets, mark as finished (canceled/void)
+          await games_collection.updateOne(
+            { id: game.id },
+            { 
+              $set: { 
+                status: "finished",
+                winner: null,
+                finishedAt: new Date(),
+                note: "Auto-canceled - old game"
+              }
+            }
+          );
+          
+          // Refund all pending bets on this game
+          const pendingBets = await placedBets_collection.find({
+            gameId: game.id,
+            status: "pending"
+          }).toArray();
+          
+          for (const bet of pendingBets) {
+            await users_collection.updateOne(
+              { userId: bet.userId },
+              { $inc: { amount: bet.amount } }
+            );
+            
+            await placedBets_collection.updateOne(
+              { id: bet.id },
+              { $set: { status: "refunded", processedAt: new Date() } }
+            );
+          }
+          
+          updated++;
+          console.log(`Canceled old game ${game.id} and refunded ${pendingBets.length} bets`);
+        }
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Cleaned up ${cleaned} old games, canceled ${updated} games with bets` 
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to cleanup old games' });
+  }
+});
+
+// Games API - only return games that haven't finished
 app.get('/api/games', async (req, res) => {
   try {
-    const games = await games_collection.find({}).toArray();
+    // Only return games that are not finished and are from last 7 days
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const games = await games_collection.find({
+      winner: { $exists: false },
+      status: { $ne: "finished" }
+    }).toArray();
+    
     res.json(games);
   } catch (err) {
     console.error(err);
@@ -186,8 +272,16 @@ app.post('/api/place-bet', async (req, res) => {
       return res.status(404).json({ error: "Game not found" });
     }
 
+    // Check if game is already finished
     if (game.winner !== undefined || game.status === 'finished') {
       return res.status(400).json({ error: "Cannot bet on finished game" });
+    }
+    
+    // Check if game is too old (more than 1 day in the past)
+    const oneDayAgo = new Date(Date.now() - 86400000);
+    const gameTime = new Date(game.time);
+    if (!isNaN(gameTime.getTime()) && gameTime < oneDayAgo) {
+      return res.status(400).json({ error: "Cannot bet on games that have already started or are too old" });
     }
 
     const odds = bet === 'home' ? game.homeOdds : game.awayOdds;
