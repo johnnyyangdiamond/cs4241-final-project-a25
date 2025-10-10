@@ -61,8 +61,9 @@ async function run() {
     await client.db("final_project").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
-    getTodaysGames();
-    updateGameResults();
+    // Initial data load
+    await getTodaysGames();
+    await updateGameResults();
 
     // Production vs Development server setup
     const PORT = process.env.PORT || 3000;
@@ -304,10 +305,10 @@ app.post("/api/balance/deduct", async (req, res) => {
   }
 });
 
-// Cron jobs
+// Cron jobs - every 15 minutes and hourly
 cron.schedule("0 * * * *", async () => {
   try {
-    console.log("Running sports data sync...")
+    console.log("Running hourly sports data sync...")
     await getTodaysGames();
     await updateGameResults();
   } catch (err) {
@@ -368,7 +369,7 @@ export async function getTodaysGames() {
         const firstOdds = game.PregameOdds?.[0] || {};
 
         const formatted = {
-          id: game.GlobalGameId,
+          id: Number(game.GlobalGameId),
           sport,
           homeTeam: game.HomeTeamName || game.HomeTeam || "Unknown",
           awayTeam: game.AwayTeamName || game.AwayTeam || "Unknown",
@@ -392,58 +393,118 @@ export async function getTodaysGames() {
 async function updateGameResults() {
   console.log("Checking game results and updating bets...");
   
+  if (!API_KEY) {
+    console.error("ERROR: API_KEY is not set! Check your .env file");
+    return;
+  }
+  
   try {
-    const pendingGames = await games_collection.find({ winner: { $exists: false } }).toArray();
+    const pendingGames = await games_collection.find({ 
+      winner: { $exists: false },
+      status: { $ne: "finished" }
+    }).toArray();
     
     if (pendingGames.length === 0) {
       console.log("No pending games to check");
       return;
     }
 
+    console.log(`Checking ${pendingGames.length} pending games...`);
+
     for (const game of pendingGames) {
+      // Use ODDS endpoint instead of SCORES endpoint (free tier compatible)
       let endpoint = "";
-      if (game.sport === "NBA") endpoint = "nba/scores/json/GamesByDate";
-      else if (game.sport === "NHL") endpoint = "nhl/scores/json/GamesByDate";
-      else if (game.sport === "MLB") endpoint = "mlb/scores/json/GamesByDate";
-      else continue;
+      if (game.sport === "NBA") endpoint = "nba/odds/json/GameOddsByDate";
+      else if (game.sport === "NHL") endpoint = "nhl/odds/json/GameOddsByDate";
+      else if (game.sport === "MLB") endpoint = "mlb/odds/json/GameOddsByDate";
+      else {
+        console.log(`Unknown sport for game ${game.id}: ${game.sport}`);
+        continue;
+      }
 
-      const today = new Date().toISOString().split("T")[0];
-      const url = `https://api.sportsdata.io/v3/${endpoint}/${today}?key=${API_KEY}`;
+      // Check today, yesterday, and 2 days ago to catch all games
+      const dates = [
+        new Date().toISOString().split("T")[0],
+        new Date(Date.now() - 86400000).toISOString().split("T")[0], // yesterday
+        new Date(Date.now() - 172800000).toISOString().split("T")[0] // 2 days ago
+      ];
+
+      let apiGame = null;
       
-      try {
-        const response = await fetch(url);
-        if (!response.ok) continue;
+      for (const date of dates) {
+        const url = `https://api.sportsdata.io/v3/${endpoint}/${date}?key=${API_KEY}`;
         
-        const data = await response.json();
-        const apiGame = data.find(g => g.GlobalGameId === game.id);
-        if (!apiGame) continue;
-
-        const isFinished = apiGame.Status === "Final" || apiGame.Status === "F";
-        
-        if (isFinished) {
-          let winner = null;
-          if (apiGame.HomeScore > apiGame.AwayScore) {
-            winner = "home";
-          } else if (apiGame.AwayScore > apiGame.HomeScore) {
-            winner = "away";
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            console.log(`API error for ${game.sport} on ${date}: ${response.status}`);
+            continue;
           }
-
-          await games_collection.updateOne(
-            { id: game.id },
-            { 
-              $set: { 
-                winner: winner, 
-                status: "finished",
-                finishedAt: new Date()
-              } 
-            }
-          );
-
-          console.log(`Game ${game.id} finished. Winner: ${winner || "tie"}`);
-          await processBetsForGame(game.id, winner);
+          
+          const data = await response.json();
+          apiGame = data.find(g => Number(g.GlobalGameId) === Number(game.id));
+          
+          if (apiGame) {
+            console.log(`Found game ${game.id} in ${date} data - Status: ${apiGame.Status}`);
+            break;
+          }
+        } catch (err) {
+          console.error(`Error fetching ${game.sport} for ${date}:`, err.message);
         }
-      } catch (err) {
-        console.error(`Error checking game ${game.id}:`, err.message);
+      }
+
+      if (!apiGame) {
+        console.log(`Game ${game.id} not found in API results`);
+        continue;
+      }
+
+      // Check if game is finished - Odds API uses Status field
+      const isFinished = apiGame.Status && (
+        apiGame.Status.toLowerCase().includes("final") || 
+        apiGame.Status.toLowerCase() === "f" ||
+        apiGame.Status.toLowerCase().includes("f/ot") ||
+        apiGame.Status.toLowerCase() === "closed"
+      );
+      
+      if (isFinished) {
+        let winner = null;
+        const homeScore = Number(apiGame.HomeTeamScore || 0);
+        const awayScore = Number(apiGame.AwayTeamScore || 0);
+        
+        console.log(`Game ${game.id}: ${game.awayTeam} ${awayScore} @ ${game.homeTeam} ${homeScore} - Status: ${apiGame.Status}`);
+        
+        if (homeScore > awayScore) {
+          winner = "home";
+        } else if (awayScore > homeScore) {
+          winner = "away";
+        } else {
+          console.log(`Game ${game.id} ended in a tie`);
+          winner = null;
+        }
+
+        // Update game with atomic operation to prevent race conditions
+        const updateResult = await games_collection.updateOne(
+          { id: Number(game.id), winner: { $exists: false } },
+          { 
+            $set: { 
+              winner: winner, 
+              status: "finished",
+              finishedAt: new Date(),
+              finalHomeScore: homeScore,
+              finalAwayScore: awayScore
+            } 
+          }
+        );
+
+        if (updateResult.modifiedCount > 0) {
+          console.log(`✅ Game ${game.id} marked as finished. Winner: ${winner || "tie"}`);
+          // Process bets immediately after marking game as finished
+          await processBetsForGame(game.id, winner);
+        } else {
+          console.log(`Game ${game.id} was already processed`);
+        }
+      } else {
+        console.log(`Game ${game.id} status: ${apiGame.Status} (not finished yet)`);
       }
     }
 
@@ -457,50 +518,89 @@ async function updateGameResults() {
 async function processBetsForGame(gameId, winner) {
   try {
     const bets = await placedBets_collection.find({ 
-      gameId: gameId, 
+      gameId: Number(gameId), 
       status: "pending" 
     }).toArray();
 
-    if (bets.length === 0) return;
+    if (bets.length === 0) {
+      console.log(`No pending bets found for game ${gameId}`);
+      return;
+    }
 
-    console.log(`Processing ${bets.length} bets for game ${gameId}`);
+    console.log(`Processing ${bets.length} bets for game ${gameId}, winner: ${winner || 'tie'}`);
+
+    const game = await games_collection.findOne({ id: Number(gameId) });
+    if (!game) {
+      console.error(`Game ${gameId} not found when processing bets!`);
+      return;
+    }
 
     for (const bet of bets) {
       let newStatus = "lost";
       let payout = 0;
 
-      if (bet.bet === winner) {
+      // Handle tie/push - return original bet amount
+      if (winner === null) {
+        newStatus = "pending"; // Keep as pending for tie games
+        payout = bet.amount;
+        
+        await users_collection.updateOne(
+          { userId: bet.userId },
+          { $inc: { amount: payout } }
+        );
+        
+        console.log(`Bet ${bet.id} pushed (tie). User ${bet.userId} refunded: $${payout.toFixed(2)}`);
+      } 
+      // Handle win
+      else if (bet.bet === winner) {
         newStatus = "won";
         
-        const game = await games_collection.findOne({ id: gameId });
-        if (game) {
-          const odds = bet.bet === "home" ? game.homeOdds : game.awayOdds;
-          
-          if (odds === null || odds === undefined) {
-            console.error(`Missing odds for game ${gameId}, returning original bet`);
-            payout = bet.amount;
-          } else if (odds > 0) {
-            payout = bet.amount + (bet.amount * odds) / 100;
+        const odds = bet.bet === "home" ? game.homeOdds : game.awayOdds;
+        
+        if (odds === null || odds === undefined) {
+          console.error(`Missing odds for game ${gameId}, returning original bet`);
+          payout = bet.amount;
+        } else {
+          const oddsNum = Number(odds);
+          if (oddsNum > 0) {
+            // Positive odds: bet $100 to win $odds
+            payout = bet.amount + (bet.amount * oddsNum) / 100;
           } else {
-            payout = bet.amount + (bet.amount * 100) / Math.abs(odds);
+            // Negative odds: bet $|odds| to win $100
+            payout = bet.amount + (bet.amount * 100) / Math.abs(oddsNum);
           }
-          
-          await users_collection.updateOne(
-            { userId: bet.userId },
-            { $inc: { amount: payout } }
-          );
-          
-          console.log(`Bet ${bet.id} won! User ${bet.userId} receives payout: $${payout.toFixed(2)}`);
         }
-      } else {
-        console.log(`Bet ${bet.id} lost.`);
+        
+        await users_collection.updateOne(
+          { userId: bet.userId },
+          { $inc: { amount: payout } }
+        );
+        
+        console.log(`Bet ${bet.id} WON! User ${bet.userId} receives payout: $${payout.toFixed(2)}`);
+      } 
+      // Handle loss
+      else {
+        console.log(`Bet ${bet.id} LOST. User ${bet.userId} loses $${bet.amount}`);
       }
 
-      await placedBets_collection.updateOne(
-        { id: bet.id },
-        { $set: { status: newStatus } }
+      // Update bet status with atomic operation
+      const updateResult = await placedBets_collection.updateOne(
+        { id: bet.id, status: "pending" },
+        { 
+          $set: { 
+            status: newStatus,
+            processedAt: new Date(),
+            payout: payout
+          } 
+        }
       );
+
+      if (updateResult.modifiedCount === 0) {
+        console.log(`Bet ${bet.id} was already processed`);
+      }
     }
+    
+    console.log(`Finished processing ${bets.length} bets for game ${gameId}`);
   } catch (err) {
     console.error(`Error processing bets for game ${gameId}:`, err);
   }
