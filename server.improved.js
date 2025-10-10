@@ -587,8 +587,7 @@ async function updateGameResults() {
       const isFinished = apiGame.Status && (
         apiGame.Status.toLowerCase().includes("final") || 
         apiGame.Status.toLowerCase() === "f" ||
-        apiGame.Status.toLowerCase().includes("f/ot") ||
-        apiGame.Status.toLowerCase().includes("f/so") ||
+        apiGame.Status.toLowerCase().includes("f/"),
         apiGame.Status.toLowerCase() === "closed"
       );
       
